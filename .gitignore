@@ -1,0 +1,182 @@
+# ==========================================
+# Python & Bytecode
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+*.manifest
+*.spec
+
+# ==========================================
+# Node / Next.js
+# ==========================================
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+npm-debug.log*
+# ==========================================
+# Virtual Environments
+# ==========================================
+venv/
+venv*/
+ENV/
+env/
+env.bak/
+venv.bak/
+.venv/
+.venv*/
+
+# ==========================================
+# Media Files (Images, Videos, Audio)
+# ==========================================
+# Images
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.gif
+*.bmp
+*.tiff
+*.tif
+*.ico
+*.svg
+Image/
+images/
+
+# Videos
+*.mp4
+*.mov
+*.MOV
+*.avi
+*.mkv
+*.webm
+*.flv
+*.wmv
+*.m4v
+
+# Audio
+*.mp3
+*.wav
+*.flac
+*.aac
+*.ogg
+*.m4a
+
+# ==========================================
+# Datasets, Caches & Test Samples
+# ==========================================
+eval_data/
+vbench/
+bench/
+test_samples/fake_images/
+test_samples/fake_videos/
+test_samples/real_images/
+test_samples/real_videos/
+manual_test_library/fake_images/
+manual_test_library/fake_videos/
+manual_test_library/real_images/
+manual_test_library/real_videos/
+static/samples/
+static/uploads/
+UniversalFakeDetect/static/samples/
+UniversalFakeDetect/static/uploads/
+UniversalFakeDetect/resources/
+**/samples/
+**/uploads/
+
+# Caches & HuggingFace
+*_cache/
+**/_hf_cache/
+.cache/
+cache/
+
+# Data formats & partial downloads
+*.parquet
+*.arrow
+*.feather
+*.csv
+*.tsv
+*.part
+*.crdownload
+
+# ==========================================
+# Model Weights & Checkpoints (Large Files)
+# ==========================================
+*.pth
+*.pt
+*.bin
+*.safetensors
+*.onnx
+*.h5
+*.hdf5
+*.ckpt
+*.weights
+*.pb
+*.tflite
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.joblib
+pretrained_weights/
+**/pretrained_weights/
+
+# ==========================================
+# Archives & Compressed Files
+# ==========================================
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+*.bz2
+*.xz
+
+# ==========================================
+# Test Runs, Logs & Generated Outputs
+# ==========================================
+*.log
+logs/
+temp/
+tmp/
+run/
+benchmark_results.json
+test_my_images_results.json
+
+# ==========================================
+# IDEs, Editors & OS Files
+# ==========================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.pytest_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+.env
+.env.*

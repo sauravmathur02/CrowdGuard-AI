@@ -1,0 +1,54 @@
+{
+  "temperature": {
+    "commfor": 1.0,
+    "bfree": 1.0,
+    "clip": 1.0,
+    "gend": 1.0,
+    "pixel": 1.0,
+    "npr": 1.0,
+    "npr_resnet": 1.0,
+    "temporal": 1.0
+  },
+  "platt": {
+    "commfor": [
+      1.0,
+      0.0
+    ],
+    "bfree": [
+      1.0,
+      0.0
+    ],
+    "npr": [
+      1.0,
+      0.0
+    ],
+    "npr_resnet": [
+      1.0,
+      0.0
+    ],
+    "clip": [
+      1.0,
+      0.0
+    ],
+    "gend": [
+      1.0,
+      0.0
+    ],
+    "pixel": [
+      1.0,
+      0.0
+    ],
+    "temporal": [
+      1.0,
+      0.0
+    ]
+  },
+  "multivariate": {
+    "w": [
+      0.5,
+      0.5
+    ],
+    "b": 0.0
+  },
+  "n_samples": 400
+}

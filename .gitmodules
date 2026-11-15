@@ -1,0 +1,3 @@
+[submodule "archive/sentinelvision-ai-surveillance"]
+	path = archive/sentinelvision-ai-surveillance
+	url = https://github.com/sauravmathur02/sentinelvision-ai-surveillance.git
