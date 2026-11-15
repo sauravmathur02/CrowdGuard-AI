@@ -75,26 +75,32 @@
 d:\Projects\Deepfake\
 ├── CrowdGuardAI/               # FastAPI Backend & Vision Pipeline
 │   ├── app.py                  # Main server, routing, CUDA device manager
-│   ├── crowd/                  # Crowd intelligence (YOLO, Risk Engine, Weapon, Integrity)
+│   ├── crowd/                  # Crowd intelligence (YOLO, tracker, behavior, risk engine, weapon classifier)
 │   ├── detectors/              # Forensics backbones (CommFor, B-Free, CLIP, GenD client)
 │   ├── models/                 # Neural architectures (CLIP, ViT, ResNet)
-│   ├── pretrained_weights/     # CUDA weights (ViT, ResNet, CLIP, yolo_crowd.pt)
-│   └── static/                 # Embedded fallback assets & samples
-├── frontend/                   # Next.js 14 React Application
+│   ├── pretrained_weights/     # Model weights (not in git; see Setup below)
+│   └── static/uploads/         # Runtime storage for media fetched via /fetch-url
+├── frontend/                   # Next.js 14 React Application (the only web UI)
 │   ├── src/app/                # Next.js App Router (page.tsx, layout.tsx, globals.css)
 │   ├── src/components/         # SurveillanceView, ForensicsView, InvestigationView, Review2PendingView
 │   ├── src/lib/api.ts          # Typed API gateway connector
-│   └── public/                 # Static verification media and sample footage
+│   └── public/static/samples/  # Demo images/videos used by the "Test Sample" buttons (incl. F.png, R.jpg)
 ├── archive/                    # Preserved legacy repositories, benchmarks & experiments
 │   ├── UniversalFakeDetect/    # Archived upstream source
 │   ├── sentinelvision.../      # Archived standalone crowd repository
 │   └── stray_scripts/          # Archived evaluation scripts
 ├── venv_gend/                  # Python virtual environment (PyTorch CUDA 12.1)
 ├── run_crowdguard.bat          # One-click startup script (Backend + Frontend)
-├── PROJECT_REPORT.md           # Comprehensive technical report & architecture spec
-├── F.png                       # Test asset: Deepfake / Manipulated verification capture
-└── R.jpg                       # Test asset: Authentic camera verification capture
+└── PROJECT_REPORT.md           # Comprehensive technical report & architecture spec
 ```
+
+`archive/sentinelvision-ai-surveillance` is a git submodule. Clone with `git clone --recurse-submodules`, or run `git submodule update --init` after cloning.
+
+### Setup
+
+- **Model weights** are not stored in git. Place them in `CrowdGuardAI/pretrained_weights/`: `yolo_crowd.pt` (YOLOv8n person tracker), `NPR.pth` (B-Free/NPR), and `fc_weights.pth` (UniversalFakeDetect CLIP head). The GenD worker downloads its OpenCV face detector files (`deploy.prototxt`, `res10_300x300_ssd_iter_140000.caffemodel`) automatically if they are missing, and Community Forensics weights (`OwensLab/commfor-model-384`) are downloaded from Hugging Face on first run.
+- **Python environment**: `python -m venv venv_gend`, then `venv_gend\Scripts\pip install -r requirements.txt -r requirements_gend.txt`.
+- **Frontend**: `cd frontend && npm install && npm run build`.
 
 ---
 
@@ -129,13 +135,14 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```powershell
 $env:Path = "C:\Program Files\nodejs;" + $env:Path
 cd frontend
+npm run build   # required after any frontend change; `npm run start` serves the last build
 npm run start
 # Or for live development:
 # npm run dev
 ```
 
-Visit the application at: **`http://localhost:3000`** (or backend gateway at `http://localhost:8000`).
+Visit the application at: **`http://localhost:3000`**. The backend API runs at `http://localhost:8000` (interactive docs at `/docs`); opening its root URL redirects to the web console.
 
 ---
 
-*See [`PROJECT_REPORT.md`](file:///d:/Projects/Deepfake/PROJECT_REPORT.md) for full technical documentation, mathematical models, and benchmark results.*
+*See [`PROJECT_REPORT.md`](PROJECT_REPORT.md) for full technical documentation, mathematical models, and benchmark results.*

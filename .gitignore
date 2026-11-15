@@ -180,3 +180,9 @@ htmlcov/
 .ipynb_checkpoints/
 .env
 .env.*
+# ==========================================
+# Exceptions: demo samples used by the web console
+# (must stay last so they override the media/samples rules above)
+# ==========================================
+!frontend/public/static/samples/
+!frontend/public/static/samples/*

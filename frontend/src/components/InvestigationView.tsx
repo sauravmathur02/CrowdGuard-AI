@@ -57,9 +57,9 @@ export default function InvestigationView() {
     try {
       setLoading(true);
       setError(null);
-      const res = await fetch(`/${filename}`);
+      const res = await fetch(`/static/samples/${filename}`);
       if (!res.ok) {
-        throw new Error(`Sample file ${filename} not found in public folder.`);
+        throw new Error(`Sample file ${filename} not found in public/static/samples.`);
       }
       const blob = await res.blob();
       const sampleFile = new File([blob], filename, { type: blob.type || "image/png" });

@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import ExifTags, Image, ImageChops
 from pydantic import BaseModel
@@ -40,10 +40,10 @@ FEEDBACK_PATH = os.path.join(DATA_DIR, "feedback.jsonl")
 BENCH_PATH = os.path.join(DATA_DIR, "bench_scores.json")
 STATIC_DIR = os.path.join(APP_DIR, "static")
 WEIGHTS_DIR = os.path.join(APP_DIR, "pretrained_weights")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
 os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(os.path.join(STATIC_DIR, "uploads"), exist_ok=True)
-os.makedirs(os.path.join(STATIC_DIR, "samples"), exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(WEIGHTS_DIR, exist_ok=True)
 
@@ -832,10 +832,10 @@ async def execute_pipeline(
 
 
 # ── FASTAPI ROUTES ─────────────────────────────────────────────────────────
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", include_in_schema=False)
 async def root():
-    content = open(os.path.join(STATIC_DIR, "index.html"), encoding="utf-8").read()
-    return HTMLResponse(content=content, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+    # The web console is the Next.js app; send browsers that open the API root there.
+    return RedirectResponse(url=FRONTEND_URL)
 
 
 class UrlFetchRequest(BaseModel):

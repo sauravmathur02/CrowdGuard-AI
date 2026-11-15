@@ -62,7 +62,8 @@ The project is structured into a clean decoupled architecture consisting of a hi
    - `yolo_detector.py`: YOLOv8 tracking engine operating with bounding box overlay and motion history. Automatically hot-swaps to custom weights `best.pt` when placed in `pretrained_weights/`.
    - `risk_engine.py`: Dynamic hazard engine evaluating density thresholds, weapon alerts, and cross-checks with video feed integrity.
    - `weapon_classifier.py`: Neural classifier specializing in edge hazard localization.
-   - `feed_integrity.py`: Temporal frame difference, timestamp continuity, and noise consistency detector.
+   - `feed_processor.py`, `tracker.py`, `smoothing.py`, `behavior.py`: Frame annotation/HUD rendering, track memory, detection smoothing, and crowd behavior analysis.
+   - Feed integrity check (`check_frame_integrity()` in `app.py`): Runs sampled frames through the Community Forensics and B-Free/NPR detectors; integrity score = 1 − max(synthetic score).
 3. **Deepfake Forensics Module (`CrowdGuardAI/detectors/`)**:
    - `Community Forensics`: Vision Transformer (ViT-S/16) trained on synthetic frequency artifacts (Diffusion, Midjourney, Flux, SD).
    - `B-Free / NPR Forensics`: Residual ResNet-50 examining neighboring pixel correlation irregularities.
@@ -86,7 +87,7 @@ The project is structured into a clean decoupled architecture consisting of a hi
 3. YOLOv8 processes each frame on CUDA:
    - Identifies person entities, computes crowd density metrics, and tracks trajectories via ByteTrack.
    - Examines weapon probability signals.
-4. Concurrently, `FeedIntegrityDetector` samples keyframe noise residuals and frame-to-frame SSIM to ensure the feed has not been hijacked.
+4. Concurrently, `check_frame_integrity()` runs sampled keyframes through the Community Forensics and B-Free/NPR detectors and flags the feed as tampered when they detect synthetic content.
 5. The combined risk score is evaluated:
    $$\text{Risk Score} = \min(100, (\text{Crowd Density Score} \times 0.4) + (\text{Weapon Threat} \times 0.6))$$
 6. The annotated frame (with HUD and bounding boxes) is rendered in base64 and returned to the UI.
@@ -161,19 +162,17 @@ To ensure a clean, professional codebase suitable for college project presentati
 | `vbench/` | `archive/vbench/` | Video benchmark scripts from early experiments. |
 | `third_party/` | `archive/third_party/` | Loose upstream utility files. |
 | `Image/` | `archive/Image/` | Stock test images from early experiments. |
-| `static/` (root) | `archive/legacy_root_static/` | Old root static assets; production static assets reside in `CrowdGuardAI/static/`. |
+| `static/` (root) | `archive/legacy_root_static/` | Old root static assets. The legacy single-page UI was later removed from `CrowdGuardAI/static/` as well; the Next.js app is the only UI, and the backend root URL redirects to it. |
 | Root test scripts (`benchmark_library.py`, `download_unidatapro.py`, `evaluate.py`, `test_all.py`, `test_variance.py`, `test_videos.py`, `run.bat`, `yolov8n.pt`) | `archive/stray_scripts/` | One-off benchmark and verification scripts from development phase. |
 
 ### Clean Root Structure
 ```
 d:\Projects\Deepfake\
-├── CrowdGuardAI/         # Unified FastAPI backend, models, static assets, and weights
-├── frontend/             # Next.js 14 + React 18 production frontend application
+├── CrowdGuardAI/         # Unified FastAPI backend, models, upload storage, and weights
+├── frontend/             # Next.js 14 + React 18 frontend (test assets F.png / R.jpg in public/static/samples/)
 ├── archive/              # Preserved legacy repositories, benchmarks, and experiments
-├── venv_gend/            # Python virtual environment with PyTorch CUDA 12.1
+├── venv_gend/            # Python virtual environment with PyTorch CUDA 12.1 (not in git)
 ├── run_crowdguard.bat    # One-click launcher starting both Backend (:8000) and Frontend (:3000)
-├── F.png                 # Test asset: Manipulated / Deepfake verification image
-├── R.jpg                 # Test asset: Authentic camera verification image
 ├── requirements.txt      # Python dependencies
 ├── requirements_gend.txt # Microservice dependencies
 ├── README.md             # Project summary and quickstart
@@ -197,10 +196,9 @@ run_crowdguard.bat
 ```
 This script will:
 1. Verify and terminate any orphaned processes on ports 8000, 8001, and 3000.
-2. Launch the **FastAPI Backend & CUDA Vision Engine** on `http://localhost:8000`.
-3. Launch the **GenD Facial Forensics Worker** on `http://127.0.0.1:8001`.
-4. Launch the **Next.js Production Frontend** on `http://localhost:3000`.
-5. Automatically open `http://localhost:3000` in your web browser.
+2. Launch the **FastAPI Backend & CUDA Vision Engine** on `http://localhost:8000`. The backend then starts the **GenD Facial Forensics Worker** on `http://127.0.0.1:8001` itself.
+3. Launch the **Next.js Production Frontend** on `http://localhost:3000` (`npm run start` serves the last build, so run `npm run build` in `frontend/` after any frontend change).
+4. Automatically open `http://localhost:3000` in your web browser.
 
 ---
 
