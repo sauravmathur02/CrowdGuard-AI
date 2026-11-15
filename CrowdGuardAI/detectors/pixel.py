@@ -4,8 +4,7 @@ Layer 2: Pixel-based AI-image detectors & Image Quality Forensics.
 Detectors:
 - CommForDetector: Community Forensics (CVPR 2025), ViT-S/16 @384.
   Aspect-ratio preserving shortest-edge resize (440px) + center / multi-crop (384px).
-- BFreeDetector: SOTA Neighboring Pixel Relationships (NPR ResNet-50, CVPR 2024)
-  & B-Free Forensics with native-scale patch analysis, multi-crop, and face crop routing.
+- BFreeDetector: B-Free (CVPR 2025), DINOv2-reg4 ViT-B on 5 native-resolution 504px crops.
 - CLIPDetector: UniversalFakeDetect CLIP ViT-L/14 with trained linear classifier.
 - Image Quality Analyzer: Laplacian variance (blur) & 8x8 JPEG quantization blockiness.
 
@@ -187,163 +186,90 @@ class CommForDetector:
 
 class BFreeDetector:
     """
-    Neighboring Pixel Relationships (NPR ResNet-50, CVPR 2024) & B-Free Forensics.
-    Analyzes high-frequency residual lattice patterns and native 1:1 scale patches.
-    Accepts full images and optional 1.3x margin face crops for localized boundary forensics.
+    B-Free (CVPR 2025, grip-unina/B-Free): DINOv2-reg4 ViT-B trained with a bias-free
+    paradigm on Stable Diffusion self-conditioned reconstructions and inpaintings.
+
+    Official inference: the full-resolution image is normalized with ImageNet statistics and
+    scored on 5 crops of 504x504 (centre + 4 corners, Wrapper5crops); no resizing.
+    Weights: detectors/B-Free/code/weights/BFREE_dino2reg4/ (see detectors/B-Free/code/README.md).
+
+    The previous NPR ResNet-50 backend was removed: on the labelled evaluation set its
+    output was below -10 logits for almost every real and fake image (AUC ~0.5).
     """
-    name = "B-Free / NPR Forensics"
+    name = "B-Free (CVPR 2025)"
+    MAX_SIDE = 1024  # centre-crop (never resize) larger inputs to bound GPU memory and time
 
     def __init__(self):
         self.model = None
         self.is_available = False
         here = os.path.dirname(os.path.abspath(__file__))
-        app_root = os.path.dirname(here)
+        code = os.path.join(here, "B-Free", "code")
+        wdir = os.path.join(code, "weights", "BFREE_dino2reg4")
+        cfg_path = os.path.join(wdir, "config.yaml")
+        if not os.path.isfile(cfg_path):
+            print(f"B-Free weights not found in {wdir}; detector disabled.")
+            return
+        try:
+            import importlib.util
+            import yaml
 
-        # 1. Primary: Load NPR ResNet-50 model from pretrained_weights
-        npr_path = os.path.join(app_root, "pretrained_weights", "NPR.pth")
-        if os.path.isfile(npr_path):
-            try:
-                from detectors.npr_resnet import resnet50
-                net = resnet50(num_classes=1)
-                st = torch.load(npr_path, map_location="cpu", weights_only=False)
-                if "model" in st:
-                    st = st["model"]
-                net.load_state_dict(st, strict=True)
-                self.model = net.to(DEVICE).eval()
-                self.norm = T.Normalize(IMAGENET_MEAN, IMAGENET_STD)
-                self.is_available = True
-                print("B-Free/NPR Detector loaded successfully (ResNet-50 NPR active).")
-                return
-            except Exception as e:
-                print(f"Warning: could not load NPR weights ({e}), attempting B-Free fallback...")
-
-        # 2. Secondary fallback: B-Free original code directory
-        bfree_code = os.path.join(here, "B-Free", "code")
-        weights_dir = os.path.join(bfree_code, "weights")
-        if os.path.isdir(weights_dir):
+            with open(cfg_path) as f:
+                cfg = yaml.safe_load(f)
+            # Load B-Free's own 'networks' package by path so it cannot clash with ours.
+            spec = importlib.util.spec_from_file_location(
+                "bfree_networks", os.path.join(code, "networks", "__init__.py"),
+                submodule_search_locations=[os.path.join(code, "networks")])
+            mod = importlib.util.module_from_spec(spec)
             import sys
-            if bfree_code not in sys.path:
-                sys.path.insert(0, bfree_code)
-            try:
-                import yaml
-                from torchvision.transforms import Compose
-                from utils.normalization import get_list_norm
-                from networks import get_network, load_weights
+            sys.modules["bfree_networks"] = mod
+            spec.loader.exec_module(mod)
+            self.model = mod.load_weights(mod.get_network(cfg["arch"]), os.path.join(wdir, cfg["weights_file"]))
+            self.model = self.model.to(DEVICE).eval()
+            self.norm = T.Compose([T.ToTensor(), T.Normalize(IMAGENET_MEAN, IMAGENET_STD)])
+            self.is_available = True
+            print("B-Free detector (DINOv2-reg4 ViT-B, 5x504 crops) loaded successfully.")
+        except Exception as e:
+            print(f"Warning: B-Free failed to load ({e}); detector disabled.")
+            self.model = None
 
-                model_name = "BFREE_dino2reg4"
-                with open(os.path.join(weights_dir, model_name, 'config.yaml')) as fid:
-                    data = yaml.load(fid, Loader=yaml.FullLoader)
-                model_path = os.path.join(weights_dir, model_name, data['weights_file'])
-
-                self.model = load_weights(get_network(data['arch']), model_path)
-                self.model = self.model.to(DEVICE).eval()
-                self.norm = Compose(get_list_norm(data['norm_type']))
-                self.is_available = True
-                print("B-Free original DINOv2 detector loaded successfully.")
-                return
-            except Exception as exc:
-                print(f"B-Free fallback failed: {exc}")
-
-        print("B-Free detector unavailable.")
-
-    def _extract_crops_for_image(self, im: Image.Image, face_crop: Optional[Image.Image] = None) -> List[torch.Tensor]:
-        """Extract native 1:1 scale patch, shortest-edge preserved crops, and face crop."""
+    def _prep(self, im: Image.Image) -> torch.Tensor:
         im = im.convert("RGB")
         w, h = im.size
-        views = []
-
-        # View 1: Native 1:1 scale center crop (preserves raw sensor noise / prevents downsampling false alarms)
-        if min(w, h) >= 224:
-            c_left = (w - 224) // 2
-            c_top = (h - 224) // 2
-            crop_native = im.crop((c_left, c_top, c_left + 224, c_top + 224))
-            views.append(self.norm(T.ToTensor()(crop_native)))
-
-            # View 2: Shortest-edge resized crop (preserves aspect ratio without squashing)
-            resize_tf = T.Resize(256, interpolation=T.InterpolationMode.BICUBIC)
-            resized = resize_tf(im)
-            rw, rh = resized.size
-            crop_scaled = resized.crop(((rw - 224) // 2, (rh - 224) // 2, (rw - 224) // 2 + 224, (rh - 224) // 2 + 224))
-            views.append(self.norm(T.ToTensor()(crop_scaled)))
-        else:
-            # Small image: pad onto 224x224 canvas
-            canvas = Image.new("RGB", (224, 224), (0, 0, 0))
-            canvas.paste(im, ((224 - w) // 2, (224 - h) // 2))
-            views.append(self.norm(T.ToTensor()(canvas)))
-
-        # View 3: If 1.3x margin face crop provided, inspect facial blending boundaries
-        if face_crop is not None:
-            fc = face_crop.convert("RGB")
-            fw, fh = fc.size
-            if min(fw, fh) >= 224:
-                fc_resized = T.Resize(256, interpolation=T.InterpolationMode.BICUBIC)(fc)
-                rw, rh = fc_resized.size
-                fc_center = fc_resized.crop(((rw - 224) // 2, (rh - 224) // 2, (rw - 224) // 2 + 224, (rh - 224) // 2 + 224))
-                views.append(self.norm(T.ToTensor()(fc_center)))
-            else:
-                canvas_fc = Image.new("RGB", (224, 224), (0, 0, 0))
-                canvas_fc.paste(fc, ((224 - fw) // 2, (224 - fh) // 2))
-                views.append(self.norm(T.ToTensor()(canvas_fc)))
-
-        return views
+        if max(w, h) > self.MAX_SIDE:
+            cw, ch = min(w, self.MAX_SIDE), min(h, self.MAX_SIDE)
+            l, t = (w - cw) // 2, (h - ch) // 2
+            im = im.crop((l, t, l + cw, t + ch))
+        return self.norm(im).unsqueeze(0)
 
     @torch.inference_mode()
+    def predict_logits(self, images: Union[Image.Image, List[Image.Image]]) -> List[float]:
+        if isinstance(images, Image.Image):
+            images = [images]
+        out = []
+        ctx = torch.amp.autocast("cuda", dtype=torch.float16) if DEVICE.type == "cuda" else torch.autocast("cpu", enabled=False)
+        for im in images:  # images differ in size; the official code also runs one at a time
+            with ctx:
+                y = self.model(self._prep(im).to(DEVICE)).float().cpu().numpy()
+            out.append(float(y[0, 0] if y.shape[1] == 1 else y[0, 1] - y[0, 0]))
+        return out
+
     def predict(
         self,
         images: Union[Image.Image, List[Image.Image]],
-        face_crops: Optional[Union[Image.Image, List[Optional[Image.Image]]]] = None
+        face_crops: Optional[Union[Image.Image, List[Optional[Image.Image]]]] = None,
     ) -> List[Optional[float]]:
-        """
-        Evaluate images with native scale & aspect-ratio preserving crops in a single GPU batch.
-        Uses torch.inference_mode and AMP FP16 to minimize latency & VRAM.
-        """
-        if not self.is_available or self.model is None:
-            if isinstance(images, Image.Image):
-                return [None]
-            return [None for _ in images]
-
+        """Calibrated P(fake) per image. face_crops is accepted for API compatibility and
+        ignored: B-Free is designed for whole images at native resolution."""
         if isinstance(images, Image.Image):
             images = [images]
-            face_crops = [face_crops] if face_crops is not None else [None]
-        elif face_crops is None:
-            face_crops = [None for _ in images]
-
-        views_per_image = []
-        all_tensors = []
-
-        for im, fc in zip(images, face_crops):
-            v_tensors = self._extract_crops_for_image(im, fc)
-            views_per_image.append(len(v_tensors))
-            all_tensors.extend(v_tensors)
-
-        # Batch GPU forward pass with AMP autocast
-        batch = torch.stack(all_tensors).to(DEVICE)
-        autocast_ctx = torch.amp.autocast("cuda", dtype=torch.float16) if DEVICE.type == "cuda" else torch.nullcontext()
-        with autocast_ctx:
-            logits = self.model(batch).flatten()
-            probs = torch.sigmoid(logits).cpu().float().numpy()
-
-        results = []
-        cursor = 0
-        for count in views_per_image:
-            sub = probs[cursor : cursor + count]
-            if count >= 3:
-                # 3 views: native (45%), scaled (25%), face crop (30%)
-                raw_p = float(0.45 * sub[0] + 0.25 * sub[1] + 0.30 * sub[2])
-                # If face crop is strongly suspicious, reflect maximum anomaly
-                if sub[2] > 0.45:
-                    raw_p = max(raw_p, float(sub[2]))
-            elif count == 2:
-                raw_p = float(0.70 * sub[0] + 0.30 * sub[1])
-            else:
-                raw_p = float(sub[0])
-
-            # Apply score calibration
+        if not self.is_available or self.model is None:
+            return [None for _ in images]
+        res = []
+        for z in self.predict_logits(images):
+            raw_p = float(1.0 / (1.0 + np.exp(-np.clip(z, -50, 50))))
             cal_p = calibration.calibrate_score("bfree", raw_p, method="platt")
-            results.append(float(cal_p if cal_p is not None else raw_p))
-            cursor += count
-
-        return results
+            res.append(float(cal_p if cal_p is not None else raw_p))
+        return res
 
 
 class CLIPDetector:

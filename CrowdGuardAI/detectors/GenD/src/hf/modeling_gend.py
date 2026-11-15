@@ -22,14 +22,17 @@ class CLIPEncoder(nn.Module):
     def __init__(self, model_name="openai/clip-vit-large-patch14"):
         super().__init__()
 
-        from transformers import CLIPModel, CLIPProcessor
+        from transformers import CLIPConfig, CLIPModel, CLIPProcessor
 
         try:
             self._preprocess = CLIPProcessor.from_pretrained(model_name)
         except Exception:
             self._preprocess = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch16")
 
-        clip: CLIPModel = CLIPModel.from_pretrained(model_name)
+        # Build the architecture from its config only. When loaded through GenD.from_pretrained,
+        # every vision weight is overwritten by the GenD checkpoint, so downloading the full
+        # OpenAI CLIP weights (~1.7 GB) first would be wasted.
+        clip: CLIPModel = CLIPModel(CLIPConfig.from_pretrained(model_name))
 
         # take vision model from CLIP, maps image to vision_embed_dim
         self.vision_model = clip.vision_model

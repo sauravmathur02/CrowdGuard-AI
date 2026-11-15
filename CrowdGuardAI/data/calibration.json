@@ -1,4 +1,6 @@
 {
+  "version": 2,
+  "fitted_at": "2026-11-16T01:11:12",
   "temperature": {
     "commfor": 1.0,
     "bfree": 1.0,
@@ -11,44 +13,563 @@
   },
   "platt": {
     "commfor": [
-      1.0,
-      0.0
+      0.5498184816847126,
+      3.4708665531702434
     ],
     "bfree": [
-      1.0,
-      0.0
-    ],
-    "npr": [
-      1.0,
-      0.0
-    ],
-    "npr_resnet": [
-      1.0,
-      0.0
+      0.45361815520414744,
+      0.8185855852040702
     ],
     "clip": [
-      1.0,
-      0.0
+      0.2900930112340181,
+      1.9269642071471207
     ],
     "gend": [
-      1.0,
-      0.0
+      0.7125922515075918,
+      -0.03146980486893677
     ],
     "pixel": [
       1.0,
       0.0
+    ],
+    "npr": [
+      0.45361815520414744,
+      0.8185855852040702
+    ],
+    "npr_resnet": [
+      0.45361815520414744,
+      0.8185855852040702
     ],
     "temporal": [
       1.0,
       0.0
     ]
   },
-  "multivariate": {
-    "w": [
-      0.5,
-      0.5
-    ],
-    "b": 0.0
+  "fusion": {
+    "no_face": {
+      "features": [
+        "commfor",
+        "bfree",
+        "clip"
+      ],
+      "w": [
+        0.6600851257948346,
+        0.48425643020391923,
+        0.4789729422958428
+      ],
+      "b": 0.08492921061046249,
+      "n_fit": 1052
+    },
+    "face": {
+      "features": [
+        "commfor",
+        "bfree",
+        "clip",
+        "gend"
+      ],
+      "w": [
+        0.616044358064498,
+        0.3923644102133193,
+        0.2239840834773999,
+        1.111924321645162
+      ],
+      "b": -0.4267178089634027,
+      "n_fit": 615
+    }
   },
-  "n_samples": 400
+  "threshold": 0.5,
+  "data": {
+    "sources": {
+      "defactify": "huggingface.co/datasets/Rajarshi-Roy-research/Defactify_Image_Dataset (validation)",
+      "dff": "huggingface.co/datasets/OpenRL/DeepFakeFace",
+      "gend_samples": "github.com/yermandy/deepfake-detection (datasets/)"
+    },
+    "image_variants": [
+      "orig",
+      "jpeg85"
+    ],
+    "counts": {
+      "defactify/sd21": 100,
+      "defactify/real": 500,
+      "defactify/sd3": 100,
+      "defactify/midjourney": 100,
+      "defactify/dalle3": 100,
+      "defactify/sdxl": 100,
+      "dff/wiki": 500,
+      "dff/insight": 166,
+      "dff/inpainting": 166,
+      "dff/text2img": 166,
+      "gend_samples/CDFv2/Celeb-real": 8,
+      "gend_samples/CDFv2/Celeb-synthesis": 8,
+      "gend_samples/CDFv2/YouTube-real": 8,
+      "gend_samples/FF/DF": 8,
+      "gend_samples/FF/F2F": 8,
+      "gend_samples/FF/FS": 8,
+      "gend_samples/FF/NT": 8,
+      "gend_samples/FF/real": 8
+    },
+    "split": "sha1(path) parity: even=fit, odd=test"
+  },
+  "eval": {
+    "split": "test",
+    "ALL": {
+      "old_rules": {
+        "n": 1010,
+        "fake_caught": 0.6204379562043796,
+        "real_correct": 1.0,
+        "balanced_acc": 0.8102189781021898,
+        "acc": 0.7940594059405941
+      },
+      "new_fusion": {
+        "n": 1010,
+        "fake_caught": 0.7937956204379562,
+        "real_correct": 0.961038961038961,
+        "balanced_acc": 0.8774172907384585,
+        "acc": 0.8702970297029703
+      },
+      "new_auc": 0.9425063987107782
+    },
+    "defactify/sd21": {
+      "old_rules": {
+        "n": 50,
+        "fake_caught": 1.0,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 1.0
+      },
+      "new_fusion": {
+        "n": 50,
+        "fake_caught": 1.0,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 1.0
+      },
+      "new_auc": null
+    },
+    "variant=orig": {
+      "old_rules": {
+        "n": 505,
+        "fake_caught": 0.6204379562043796,
+        "real_correct": 1.0,
+        "balanced_acc": 0.8102189781021898,
+        "acc": 0.7940594059405941
+      },
+      "new_fusion": {
+        "n": 505,
+        "fake_caught": 0.7883211678832117,
+        "real_correct": 0.961038961038961,
+        "balanced_acc": 0.8746800644610864,
+        "acc": 0.8673267326732673
+      },
+      "new_auc": 0.9409264701235505
+    },
+    "no face": {
+      "old_rules": {
+        "n": 395,
+        "fake_caught": 0.4888888888888889,
+        "real_correct": 1.0,
+        "balanced_acc": 0.7444444444444445,
+        "acc": 0.7670886075949367
+      },
+      "new_fusion": {
+        "n": 395,
+        "fake_caught": 0.7277777777777777,
+        "real_correct": 0.986046511627907,
+        "balanced_acc": 0.8569121447028424,
+        "acc": 0.8683544303797468
+      },
+      "new_auc": 0.9236434108527132
+    },
+    "variant=jpeg85": {
+      "old_rules": {
+        "n": 505,
+        "fake_caught": 0.6204379562043796,
+        "real_correct": 1.0,
+        "balanced_acc": 0.8102189781021898,
+        "acc": 0.7940594059405941
+      },
+      "new_fusion": {
+        "n": 505,
+        "fake_caught": 0.7992700729927007,
+        "real_correct": 0.961038961038961,
+        "balanced_acc": 0.8801545170158309,
+        "acc": 0.8732673267326733
+      },
+      "new_auc": 0.9443391158719626
+    },
+    "defactify/real": {
+      "old_rules": {
+        "n": 226,
+        "fake_caught": null,
+        "real_correct": 1.0,
+        "balanced_acc": null,
+        "acc": 1.0
+      },
+      "new_fusion": {
+        "n": 226,
+        "fake_caught": null,
+        "real_correct": 0.9911504424778761,
+        "balanced_acc": null,
+        "acc": 0.9911504424778761
+      },
+      "new_auc": null
+    },
+    "defactify/midjourney": {
+      "old_rules": {
+        "n": 48,
+        "fake_caught": 0.041666666666666664,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 0.041666666666666664
+      },
+      "new_fusion": {
+        "n": 48,
+        "fake_caught": 0.6458333333333334,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 0.6458333333333334
+      },
+      "new_auc": null
+    },
+    "defactify/dalle3": {
+      "old_rules": {
+        "n": 62,
+        "fake_caught": 0.16129032258064516,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 0.16129032258064516
+      },
+      "new_fusion": {
+        "n": 62,
+        "fake_caught": 0.4032258064516129,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 0.4032258064516129
+      },
+      "new_auc": null
+    },
+    "defactify/sdxl": {
+      "old_rules": {
+        "n": 52,
+        "fake_caught": 1.0,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 1.0
+      },
+      "new_fusion": {
+        "n": 52,
+        "fake_caught": 0.9615384615384616,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 0.9615384615384616
+      },
+      "new_auc": null
+    },
+    "faces scored": {
+      "old_rules": {
+        "n": 615,
+        "fake_caught": 0.6847826086956522,
+        "real_correct": 1.0,
+        "balanced_acc": 0.8423913043478262,
+        "acc": 0.8113821138211382
+      },
+      "new_fusion": {
+        "n": 615,
+        "fake_caught": 0.8260869565217391,
+        "real_correct": 0.9392712550607287,
+        "balanced_acc": 0.882679105791234,
+        "acc": 0.8715447154471545
+      },
+      "new_auc": 0.9538813589156838
+    },
+    "defactify/sd3": {
+      "old_rules": {
+        "n": 42,
+        "fake_caught": 0.9047619047619048,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 0.9047619047619048
+      },
+      "new_fusion": {
+        "n": 42,
+        "fake_caught": 0.9523809523809523,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 0.9523809523809523
+      },
+      "new_auc": null
+    },
+    "dff/wiki": {
+      "old_rules": {
+        "n": 222,
+        "fake_caught": null,
+        "real_correct": 1.0,
+        "balanced_acc": null,
+        "acc": 1.0
+      },
+      "new_fusion": {
+        "n": 222,
+        "fake_caught": null,
+        "real_correct": 0.9684684684684685,
+        "balanced_acc": null,
+        "acc": 0.9684684684684685
+      },
+      "new_auc": null
+    },
+    "dff/insight": {
+      "old_rules": {
+        "n": 98,
+        "fake_caught": 0.08163265306122448,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 0.08163265306122448
+      },
+      "new_fusion": {
+        "n": 98,
+        "fake_caught": 0.45918367346938777,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 0.45918367346938777
+      },
+      "new_auc": null
+    },
+    "dff/inpainting": {
+      "old_rules": {
+        "n": 96,
+        "fake_caught": 0.9791666666666666,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 0.9791666666666666
+      },
+      "new_fusion": {
+        "n": 96,
+        "fake_caught": 1.0,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 1.0
+      },
+      "new_auc": null
+    },
+    "dff/text2img": {
+      "old_rules": {
+        "n": 86,
+        "fake_caught": 1.0,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 1.0
+      },
+      "new_fusion": {
+        "n": 86,
+        "fake_caught": 1.0,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 1.0
+      },
+      "new_auc": null
+    },
+    "gend_samples/CDFv2/Celeb-real": {
+      "old_rules": {
+        "n": 2,
+        "fake_caught": null,
+        "real_correct": 1.0,
+        "balanced_acc": null,
+        "acc": 1.0
+      },
+      "new_fusion": {
+        "n": 2,
+        "fake_caught": null,
+        "real_correct": 0.0,
+        "balanced_acc": null,
+        "acc": 0.0
+      },
+      "new_auc": null
+    },
+    "gend_samples/CDFv2/Celeb-synthesis": {
+      "old_rules": {
+        "n": 2,
+        "fake_caught": 0.0,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 0.0
+      },
+      "new_fusion": {
+        "n": 2,
+        "fake_caught": 0.0,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 0.0
+      },
+      "new_auc": null
+    },
+    "gend_samples/CDFv2/YouTube-real": {
+      "old_rules": {
+        "n": 6,
+        "fake_caught": null,
+        "real_correct": 1.0,
+        "balanced_acc": null,
+        "acc": 1.0
+      },
+      "new_fusion": {
+        "n": 6,
+        "fake_caught": null,
+        "real_correct": 0.3333333333333333,
+        "balanced_acc": null,
+        "acc": 0.3333333333333333
+      },
+      "new_auc": null
+    },
+    "gend_samples/FF/DF": {
+      "old_rules": {
+        "n": 6,
+        "fake_caught": 0.0,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 0.0
+      },
+      "new_fusion": {
+        "n": 6,
+        "fake_caught": 1.0,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 1.0
+      },
+      "new_auc": null
+    },
+    "gend_samples/FF/F2F": {
+      "old_rules": {
+        "n": 4,
+        "fake_caught": 0.0,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 0.0
+      },
+      "new_fusion": {
+        "n": 4,
+        "fake_caught": 1.0,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 1.0
+      },
+      "new_auc": null
+    },
+    "gend_samples/FF/FS": {
+      "old_rules": {
+        "n": 2,
+        "fake_caught": 0.0,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 0.0
+      },
+      "new_fusion": {
+        "n": 2,
+        "fake_caught": 1.0,
+        "real_correct": null,
+        "balanced_acc": null,
+        "acc": 1.0
+      },
+      "new_auc": null
+    },
+    "gend_samples/FF/real": {
+      "old_rules": {
+        "n": 6,
+        "fake_caught": null,
+        "real_correct": 1.0,
+        "balanced_acc": null,
+        "acc": 1.0
+      },
+      "new_fusion": {
+        "n": 6,
+        "fake_caught": null,
+        "real_correct": 0.5,
+        "balanced_acc": null,
+        "acc": 0.5
+      },
+      "new_auc": null
+    },
+    "source=defactify": {
+      "old_rules": {
+        "n": 480,
+        "fake_caught": 0.5984251968503937,
+        "real_correct": 1.0,
+        "balanced_acc": 0.7992125984251969,
+        "acc": 0.7875
+      },
+      "new_fusion": {
+        "n": 480,
+        "fake_caught": 0.7716535433070866,
+        "real_correct": 0.9911504424778761,
+        "balanced_acc": 0.8814019928924813,
+        "acc": 0.875
+      },
+      "new_auc": 0.9474775276984182
+    },
+    "source=dff": {
+      "old_rules": {
+        "n": 502,
+        "fake_caught": 0.6714285714285714,
+        "real_correct": 1.0,
+        "balanced_acc": 0.8357142857142856,
+        "acc": 0.8167330677290837
+      },
+      "new_fusion": {
+        "n": 502,
+        "fake_caught": 0.8107142857142857,
+        "real_correct": 0.9684684684684685,
+        "balanced_acc": 0.889591377091377,
+        "acc": 0.8804780876494024
+      },
+      "new_auc": 0.9538931788931789
+    },
+    "source=gend_samples": {
+      "old_rules": {
+        "n": 28,
+        "fake_caught": 0.0,
+        "real_correct": 1.0,
+        "balanced_acc": 0.5,
+        "acc": 0.5
+      },
+      "new_fusion": {
+        "n": 28,
+        "fake_caught": 0.8571428571428571,
+        "real_correct": 0.35714285714285715,
+        "balanced_acc": 0.6071428571428571,
+        "acc": 0.6071428571428571
+      },
+      "new_auc": 0.8520408163265306
+    },
+    "single_detectors": {
+      "commfor": {
+        "n": 1010,
+        "fake_caught": 0.7554744525547445,
+        "real_correct": 0.9155844155844156,
+        "balanced_acc": 0.83552943406958,
+        "acc": 0.8287128712871287,
+        "auc": 0.8872444465510159
+      },
+      "bfree": {
+        "n": 1010,
+        "fake_caught": 0.7281021897810219,
+        "real_correct": 0.9025974025974026,
+        "balanced_acc": 0.8153497961892122,
+        "acc": 0.807920792079208,
+        "auc": 0.8661820235725345
+      },
+      "clip": {
+        "n": 1010,
+        "fake_caught": 0.5912408759124088,
+        "real_correct": 0.6753246753246753,
+        "balanced_acc": 0.6332827756185421,
+        "acc": 0.6297029702970297,
+        "auc": 0.692490599424906
+      },
+      "gend": {
+        "n": 615,
+        "fake_caught": 0.6657608695652174,
+        "real_correct": 0.8663967611336032,
+        "balanced_acc": 0.7660788153494102,
+        "acc": 0.7463414634146341,
+        "auc": 0.8276491814821334
+      }
+    }
+  }
 }

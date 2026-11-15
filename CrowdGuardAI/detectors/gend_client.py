@@ -3,13 +3,12 @@ Client for the GenD face-forensics worker.
 
 The worker needs a different `transformers` version than the main app, so it
 runs in its own virtualenv (../venv_gend). This module starts it as a child
-process and talks to it over localhost. If the venv is missing, GenD is simply
-disabled and the app keeps working with the other detectors.
+process and talks to it over localhost. If the worker is unavailable, face
+scores come back as "not checked" (with an error) instead of a fake 0.0.
 """
 import atexit
 import os
 import subprocess
-import sys
 import time
 
 import requests
@@ -57,63 +56,80 @@ def stop():
     _proc = None
 
 
-def is_healthy() -> bool:
-    """Return True if worker process is running and answering health checks."""
-    global _proc
-    if _proc is None or _proc.poll() is not None:
-        return False
+def _health() -> dict:
     try:
         r = requests.get(f"{URL}/health", timeout=1.5)
-        return r.ok
+        return r.json() if r.ok else {}
     except Exception:
+        return {}
+
+
+def is_healthy() -> bool:
+    """Return True if the worker process is running and has a face model loaded."""
+    if _proc is None or _proc.poll() is not None:
         return False
+    return bool(_health().get("ok"))
 
 
 def get_status() -> dict:
     """Return status of the GenD worker process."""
-    global _proc
     running = _proc is not None and _proc.poll() is None
-    healthy = is_healthy() if running else False
+    h = _health() if running else {}
     return {
         "running": running,
-        "healthy": healthy,
+        "healthy": bool(h.get("ok")),
+        "model": h.get("model"),
         "pid": _proc.pid if running else None,
         "port": PORT,
-        "url": URL
+        "url": URL,
     }
 
 
-def score(filename: str, data: bytes, content_type: str = ""):
+def score(filename: str, data: bytes, content_type: str = "") -> dict:
     """
-    Return (gend_prob_fake or None, faces_found, face_box or None).
-    Uses non-blocking fault-tolerant timeout with graceful fallback to None.
+    Score faces with the worker. Always returns a dict:
+      score        calibrated P(fake) of the face(s), or None
+      raw          uncalibrated worker score, or None
+      faces        number of faces detected (max over sampled frames)
+      box          normalized [x, y, w, h] of the most suspicious face, or None
+      model        name of the face model the worker used
+      frame_scores per-frame face scores (videos)
+      error        None when the worker answered; otherwise why no face score exists.
+                   A missing score with error=None means "no face found", which is a
+                   valid answer. A missing score with an error means "not checked".
     """
-    global _proc
+    out = {"score": None, "raw": None, "faces": 0, "box": None, "model": None, "frame_scores": [], "error": None}
     if _proc is None or _proc.poll() is not None:
-        return None, 0, None
-
+        out["error"] = "Face-forensics worker is not running."
+        return out
     name = (filename or "").lower()
-    is_video = name.endswith((".mp4", ".mov", ".avi", ".mkv", ".webm")) or content_type.startswith("video/")
-    timeout_tuple = (2.5, 18.0) if is_video else (2.0, 6.0)
-
+    is_video = name.endswith((".mp4", ".mov", ".avi", ".mkv", ".webm")) or (content_type or "").startswith("video/")
+    timeout_tuple = (3.0, 120.0) if is_video else (3.0, 30.0)
     try:
-        r = requests.post(
-            f"{URL}/score",
-            files={"file": (filename, data, content_type)},
-            timeout=timeout_tuple
-        )
+        r = requests.post(f"{URL}/score", files={"file": (filename, data, content_type)}, timeout=timeout_tuple)
         if not r.ok:
-            return None, 0, None
+            out["error"] = f"Face-forensics worker returned HTTP {r.status_code}."
+            return out
         j = r.json()
-        raw_gend = j.get("gend")
-        cal_gend = _calibrate_score("gend", raw_gend) if raw_gend is not None else None
-        final_score = cal_gend if cal_gend is not None else raw_gend
-        return (round(float(final_score), 6) if final_score is not None else None), int(j.get("faces", 0)), j.get("box")
     except requests.exceptions.Timeout:
-        print("Notice: GenD worker timed out; continuing ensemble without face-forensics.")
-        return None, 0, None
+        out["error"] = "Face-forensics worker timed out."
+        print("Notice: GenD worker timed out.")
+        return out
     except Exception as e:
-        print(f"Notice: GenD worker communication error ({e}); graceful fallback active.")
-        return None, 0, None
+        out["error"] = f"Face-forensics worker error: {e}"
+        print(f"Notice: GenD worker communication error ({e}).")
+        return out
 
-
+    raw = j.get("gend")
+    out.update({
+        "raw": raw,
+        "faces": int(j.get("faces") or 0),
+        "box": j.get("box"),
+        "model": j.get("model"),
+        "frame_scores": j.get("frame_scores") or [],
+    })
+    if j.get("model") is None:
+        out["error"] = "No face-forensics model is loaded in the worker."
+    elif raw is not None:
+        out["score"] = round(float(_calibrate_score("gend", raw)), 6)
+    return out

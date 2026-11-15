@@ -297,6 +297,16 @@ export default function InvestigationView() {
 
                 {/* Findings List */}
                 <div className="space-y-2 mb-6">
+                  {result.media_authenticity.warnings && result.media_authenticity.warnings.length > 0 && (
+                    <div className="space-y-1">
+                      {result.media_authenticity.warnings.map((w, idx) => (
+                        <div key={idx} className="flex items-start gap-2 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-2.5 py-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                          <span>{w}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
                     Forensic Indicators
                   </span>

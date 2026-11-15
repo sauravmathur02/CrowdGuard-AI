@@ -1,14 +1,21 @@
 """
 GenD face-forensics worker (runs inside venv_gend, started automatically by app.py).
 
-POST /score  (multipart file: image or video)  ->  {"gend": float|None, "faces": int, "box": list|None}
-gend = P(fake) over detected face crops with robust multi-angle multi-face localization.
+POST /score  (multipart file: image or video)
+  -> {"gend": float|None, "faces": int, "box": list|None, "model": str|None, "frame_scores": list}
+
+gend = raw P(fake) of the most suspicious detected face (images) or the mean of the
+most suspicious half of sampled frames (videos). Calibration is applied by the backend.
+
+Face model priority:
+  1. GenD CLIP ViT-L/14 (yermandy/GenD_CLIP_L_14, WACV 2026) in pretrained_weights/GenD
+  2. Generic ViT classifier in pretrained_weights/deepfake_face (fallback only)
 """
-import io
 import os
 import sys
 import tempfile
 import urllib.request
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -21,117 +28,138 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "detectors", "GenD"))
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+WEIGHTS = os.path.join(HERE, "pretrained_weights")
+VIDEO_EXT = (".mp4", ".avi", ".mov", ".mkv", ".webm")
+VIDEO_FRAMES = 16
 
-# Multi-angle face cascades (frontal + profile) for high recall across video motion
+# GenD's own preprocessing (detector.py -s 1.3) crops a square 1.3x the face box.
+FACE_SCALE = 1.3
+DNN_CONF = 0.5
+MIN_FACE_PX = 40
+
+# ── Face detection: OpenCV DNN ResNet-SSD, Haar frontal as fallback ───────────
 cascade_frontal = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-cascade_profile = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_profileface.xml")
-
-# ── OpenCV DNN face detector (ResNet SSD) ─────────────────────────────────────
-# Much more robust than Haar: handles tilted, partially occluded, dark-skinned, make-up faces.
-_DNN_NET = None
-_DNN_PROTOTXT = os.path.join(HERE, "pretrained_weights", "deploy.prototxt")
-_DNN_CAFFEMODEL = os.path.join(HERE, "pretrained_weights", "res10_300x300_ssd_iter_140000.caffemodel")
-
+_DNN_PROTOTXT = os.path.join(WEIGHTS, "deploy.prototxt")
+_DNN_CAFFEMODEL = os.path.join(WEIGHTS, "res10_300x300_ssd_iter_140000.caffemodel")
 _PROTOTXT_URL = "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt"
 _CAFFEMODEL_URL = "https://github.com/opencv/opencv_3rdparty/raw/dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000.caffemodel"
 
-def _ensure_dnn_weights():
-    """Download DNN weights if not already present (one-time, ~2MB)."""
-    os.makedirs(os.path.join(HERE, "pretrained_weights"), exist_ok=True)
+
+def _load_dnn_net():
+    os.makedirs(WEIGHTS, exist_ok=True)
     for path, url in [(_DNN_PROTOTXT, _PROTOTXT_URL), (_DNN_CAFFEMODEL, _CAFFEMODEL_URL)]:
         if not os.path.isfile(path):
             try:
                 print(f"Downloading DNN face detector: {os.path.basename(path)}...")
                 urllib.request.urlretrieve(url, path)
             except Exception as e:
-                print(f"Warning: Could not download {os.path.basename(path)}: {e}")
-                return False
-    return True
-
-def _load_dnn_net():
-    global _DNN_NET
-    if _DNN_NET is not None:
-        return _DNN_NET
+                print(f"Warning: could not download {os.path.basename(path)}: {e}")
+                return None
     try:
-        if _ensure_dnn_weights() and os.path.isfile(_DNN_CAFFEMODEL) and os.path.isfile(_DNN_PROTOTXT):
-            _DNN_NET = cv2.dnn.readNetFromCaffe(_DNN_PROTOTXT, _DNN_CAFFEMODEL)
-            print("DNN face detector (ResNet SSD) loaded.")
+        net = cv2.dnn.readNetFromCaffe(_DNN_PROTOTXT, _DNN_CAFFEMODEL)
+        print("DNN face detector (ResNet SSD) loaded.")
+        return net
     except Exception as e:
         print(f"DNN face detector unavailable: {e}")
-    return _DNN_NET
+        return None
 
-try:
-    _load_dnn_net()
-except Exception:
-    pass
 
-VIDEO_EXT = (".mp4", ".avi", ".mov", ".mkv", ".webm")
-app = FastAPI()
+_DNN_NET = _load_dnn_net()
 
-# Try loading deepfake face ViT (dima806/deepfake_vs_real_image_detection) or GenD
+
+def detect_faces(bgr: np.ndarray) -> List[Tuple[int, int, int, int]]:
+    """Return face boxes (x, y, w, h) in pixels, largest first."""
+    H, W = bgr.shape[:2]
+    faces = []
+    if _DNN_NET is not None:
+        blob = cv2.dnn.blobFromImage(cv2.resize(bgr, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0))
+        _DNN_NET.setInput(blob)
+        det = _DNN_NET.forward()
+        for i in range(det.shape[2]):
+            if float(det[0, 0, i, 2]) < DNN_CONF:
+                continue
+            x0, y0 = max(0, int(det[0, 0, i, 3] * W)), max(0, int(det[0, 0, i, 4] * H))
+            x1, y1 = min(W, int(det[0, 0, i, 5] * W)), min(H, int(det[0, 0, i, 6] * H))
+            if (x1 - x0) >= MIN_FACE_PX and (y1 - y0) >= MIN_FACE_PX:
+                faces.append((x0, y0, x1 - x0, y1 - y0))
+    if not faces:
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        found = cascade_frontal.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(MIN_FACE_PX, MIN_FACE_PX))
+        faces = [tuple(int(v) for v in f) for f in found]
+    return sorted(faces, key=lambda r: r[2] * r[3], reverse=True)
+
+
+def face_crops(bgr: np.ndarray, max_faces: int = 3) -> List[Tuple[Image.Image, List[float]]]:
+    """Square crops of FACE_SCALE x the face box (GenD preprocessing) with normalized boxes."""
+    if bgr is None or bgr.size == 0:
+        return []
+    H, W = bgr.shape[:2]
+    out = []
+    for (x, y, w, h) in detect_faces(bgr)[:max_faces]:
+        cx, cy, side = x + w / 2.0, y + h / 2.0, FACE_SCALE * max(w, h)
+        x0, y0 = int(max(0, cx - side / 2)), int(max(0, cy - side / 2))
+        x1, y1 = int(min(W, cx + side / 2)), int(min(H, cy + side / 2))
+        crop = Image.fromarray(cv2.cvtColor(bgr[y0:y1, x0:x1], cv2.COLOR_BGR2RGB))
+        out.append((crop, [x / W, y / H, w / W, h / H]))
+    return out
+
+
+# ── Face-forensics model ──────────────────────────────────────────────────────
 gend_model = None
-face_detector = None
-deepfake_face_model = None
-deepfake_face_proc = None
-
-# Check pretrained_weights/deepfake_face first, then GenD
-face_ckpt = os.path.join(HERE, "pretrained_weights", "deepfake_face")
-if not os.path.isdir(face_ckpt):
-    face_ckpt = os.path.join(HERE, "pretrained_weights", "GenD")
-
-if os.path.isdir(face_ckpt):
-    try:
-        from transformers import AutoModelForImageClassification, AutoImageProcessor
-        deepfake_face_proc = AutoImageProcessor.from_pretrained(face_ckpt)
-        deepfake_face_model = AutoModelForImageClassification.from_pretrained(face_ckpt).to(DEVICE).eval()
-        print(f"Deepfake Face ViT loaded successfully from {face_ckpt} onto {DEVICE}.")
-    except Exception as e:
-        print(f"Warning: Failed to load ViT from {face_ckpt}: {e}")
+fallback_model = None
+fallback_proc = None
+MODEL_NAME: Optional[str] = None
 
 try:
     from src.hf.modeling_gend import GenD
-    ckpt_dir = os.path.join(HERE, "pretrained_weights", "GenD")
-    if os.path.isdir(ckpt_dir):
-        gend_model = GenD.from_pretrained(ckpt_dir).to(DEVICE).eval()
-except Exception:
+
+    _gend_dir = os.path.join(WEIGHTS, "GenD")
+    if os.path.isfile(os.path.join(_gend_dir, "model.safetensors")):
+        gend_model = GenD.from_pretrained(_gend_dir).to(DEVICE).eval()
+        MODEL_NAME = "GenD_CLIP_L_14"
+        print(f"GenD face model loaded from {_gend_dir} onto {DEVICE}.")
+    else:
+        print(f"GenD weights not found in {_gend_dir}.")
+except Exception as e:
+    print(f"Warning: GenD failed to load: {e}")
     gend_model = None
 
-if gend_model is None and deepfake_face_model is None:
-    # ── Patch calibration shim before importing pixel detectors ────────────────
-    # The worker runs in venv_gend where 'detectors.calibration' may not be
-    # importable. We inject a pass-through shim so CommForDetector / BFreeDetector
-    # can be used as face-crop fallbacks without the 'calibration is not defined' error.
-    import sys as _sys
-    import types as _types
+if gend_model is None:
+    _fb_dir = os.path.join(WEIGHTS, "deepfake_face")
+    if os.path.isdir(_fb_dir):
+        try:
+            from transformers import AutoImageProcessor, AutoModelForImageClassification
 
-    def _noop_calibrate(detector_name, raw_score, method="platt"):
-        """Identity pass-through: returns raw score unchanged (no calibration)."""
-        return raw_score
+            fallback_proc = AutoImageProcessor.from_pretrained(_fb_dir)
+            fallback_model = AutoModelForImageClassification.from_pretrained(_fb_dir).to(DEVICE).eval()
+            MODEL_NAME = "deepfake_face_vit (fallback)"
+            print(f"Fallback face ViT loaded from {_fb_dir}. Install GenD weights for reliable face-swap detection.")
+        except Exception as e:
+            print(f"Warning: fallback face ViT failed to load: {e}")
 
-    _calib_shim = _types.ModuleType("detectors.calibration")
-    _calib_shim.calibrate_score = _noop_calibrate
-    _calib_shim.load = lambda: {}
-    _calib_shim.fit_from_benchmark = lambda: {}
-    _calib_shim.apply_multivariate_platt = lambda c, b: (c + b) / 2.0
-
-    # Register shim under both possible import paths
-    _sys.modules.setdefault("calibration", _calib_shim)
-    _sys.modules.setdefault("detectors.calibration", _calib_shim)
-
-    try:
-        from detectors.pixel import CommForDetector, BFreeDetector
-        face_detector_commfor = CommForDetector()
-        face_detector_npr = BFreeDetector()
-    except Exception as e:
-        print(f"GenD worker detector initialization warning: {e}")
-        face_detector_commfor = None
-        face_detector_npr = None
-else:
-    face_detector_commfor = None
-    face_detector_npr = None
+if MODEL_NAME is None:
+    print("No face-forensics model available; /score will return gend=None.")
 
 
-def _video_frames(data: bytes, suffix: str, n: int = 12):
+@torch.inference_mode()
+def score_crops(crops: List[Image.Image]) -> List[float]:
+    """Raw P(fake) per face crop."""
+    if not crops:
+        return []
+    if gend_model is not None:
+        x = torch.stack([gend_model.feature_extractor.preprocess(c.convert("RGB")) for c in crops]).to(DEVICE)
+        ctx = torch.amp.autocast("cuda", dtype=torch.float16) if DEVICE == "cuda" else torch.autocast("cpu", enabled=False)
+        with ctx:
+            probs = gend_model(x).softmax(dim=-1)[:, 1]
+        return [float(p) for p in probs.float().cpu().numpy()]
+    if fallback_model is not None:
+        inputs = fallback_proc(images=[c.convert("RGB") for c in crops], return_tensors="pt").to(DEVICE)
+        probs = torch.softmax(fallback_model(**inputs).logits, dim=-1)[:, 1]
+        return [float(p) for p in probs.float().cpu().numpy()]
+    return []
+
+
+def video_frames(data: bytes, suffix: str, n: int = VIDEO_FRAMES) -> List[np.ndarray]:
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as t:
         t.write(data)
         path = t.name
@@ -140,8 +168,7 @@ def _video_frames(data: bytes, suffix: str, n: int = 12):
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         out = []
         if total > 0:
-            indices = np.linspace(0, max(total - 1, 0), n).astype(int)
-            for i in indices:
+            for i in np.linspace(0, max(total - 1, 0), min(n, total)).astype(int):
                 cap.set(cv2.CAP_PROP_POS_FRAMES, int(i))
                 ok, f = cap.read()
                 if ok:
@@ -155,246 +182,60 @@ def _video_frames(data: bytes, suffix: str, n: int = 12):
             pass
 
 
-def _dnn_detect_faces(bgr, conf_threshold=0.35):
-    """
-    OpenCV DNN ResNet SSD face detector — much higher recall than Haar cascades.
-    Works well on angled, partially occluded, dark-skinned, and made-up faces.
-    Returns list of (x, y, w, h) bounding boxes.
-    """
-    net = _DNN_NET
-    if net is None:
-        return []
-    try:
-        H, W = bgr.shape[:2]
-        # Resize to 300x300 as expected by the ResNet SSD
-        blob = cv2.dnn.blobFromImage(cv2.resize(bgr, (300, 300)), 1.0, (300, 300),
-                                      (104.0, 177.0, 123.0), swapRB=False, crop=False)
-        net.setInput(blob)
-        detections = net.forward()
-        faces = []
-        for i in range(detections.shape[2]):
-            confidence = float(detections[0, 0, i, 2])
-            if confidence < conf_threshold:
-                continue
-            x0 = max(0, int(detections[0, 0, i, 3] * W))
-            y0 = max(0, int(detections[0, 0, i, 4] * H))
-            x1 = min(W, int(detections[0, 0, i, 5] * W))
-            y1 = min(H, int(detections[0, 0, i, 6] * H))
-            if (x1 - x0) >= 30 and (y1 - y0) >= 30:
-                faces.append((x0, y0, x1 - x0, y1 - y0))
-        return faces
-    except Exception as e:
-        print(f"DNN face detection error: {e}")
-        return []
+def aggregate_video(frame_scores: List[float]) -> float:
+    """Mean of the most suspicious half of frames: a swap that is present in part of the clip
+    still registers, while a single noisy frame cannot decide the verdict on its own."""
+    s = sorted(frame_scores, reverse=True)
+    k = max(1, (len(s) + 1) // 2)
+    return float(np.mean(s[:k]))
 
 
-def _detect_faces_robust(gray, bgr=None):
-    """
-    3-tier face detection for maximum recall:
-    Tier 1: OpenCV DNN ResNet SSD (best — handles tilt, occlusion, diverse skin tones)
-    Tier 2: Haar cascades frontal + profile with aggressive settings
-    Tier 3: Very loose Haar with minNeighbors=1 as last resort
-    """
-    # Tier 1: DNN detector (operates on color image)
-    if bgr is not None and _DNN_NET is not None:
-        dnn_faces = _dnn_detect_faces(bgr, conf_threshold=0.35)
-        if dnn_faces:
-            return dnn_faces
+def score_media(data: bytes, name: str, content_type: str = "") -> dict:
+    name = (name or "").lower()
+    is_video = name.endswith(VIDEO_EXT) or (content_type or "").startswith("video/")
+    if is_video:
+        frames = video_frames(data, os.path.splitext(name)[1] or ".mp4")
+    else:
+        arr = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        frames = [arr] if arr is not None else []
 
-    # Tier 2: Haar frontal cascade
-    faces = cascade_frontal.detectMultiScale(gray, scaleFactor=1.07, minNeighbors=2, minSize=(28, 28))
-    if len(faces) > 0:
-        return faces
+    per_frame, best_box, best_p, max_faces = [], None, -1.0, 0
+    for f in frames:
+        fc = face_crops(f)
+        if not fc:
+            continue
+        max_faces = max(max_faces, len(fc))
+        probs = score_crops([c for c, _ in fc])
+        if not probs:
+            continue
+        i = int(np.argmax(probs))
+        per_frame.append(float(probs[i]))  # the most suspicious face in this frame
+        if probs[i] > best_p:
+            best_p, best_box = float(probs[i]), fc[i][1]
 
-    # Try equalized histogram for difficult lighting conditions
-    gray_eq = cv2.equalizeHist(gray)
-    faces = cascade_frontal.detectMultiScale(gray_eq, scaleFactor=1.07, minNeighbors=2, minSize=(28, 28))
-    if len(faces) > 0:
-        return faces
-
-    # Tier 2b: Profile cascade (left and right)
-    if not cascade_profile.empty():
-        faces = cascade_profile.detectMultiScale(gray, scaleFactor=1.07, minNeighbors=2, minSize=(28, 28))
-        if len(faces) > 0:
-            return faces
-        flipped = cv2.flip(gray, 1)
-        faces_flipped = cascade_profile.detectMultiScale(flipped, scaleFactor=1.07, minNeighbors=2, minSize=(28, 28))
-        if len(faces_flipped) > 0:
-            W = gray.shape[1]
-            return [(W - x - w, y, w, h) for (x, y, w, h) in faces_flipped]
-
-    # Tier 3: Last resort — very aggressive Haar (minNeighbors=1)
-    faces = cascade_frontal.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=1, minSize=(24, 24))
-    if len(faces) > 0:
-        # Filter to the largest (most confident) detection only
-        return [max(faces, key=lambda r: r[2] * r[3])]
-
-    return []
+    if not per_frame:
+        return {"gend": None, "faces": max_faces, "box": best_box, "model": MODEL_NAME, "frame_scores": []}
+    gend = aggregate_video(per_frame) if is_video else per_frame[0]
+    return {
+        "gend": round(gend, 6),
+        "faces": max_faces,
+        "box": best_box,
+        "model": MODEL_NAME,
+        "frame_scores": [round(p, 4) for p in per_frame],
+        "frames_with_faces": len(per_frame),
+        "frames_sampled": len(frames),
+    }
 
 
-def _heuristic_face_region(bgr):
-    """
-    When ALL detection tiers fail, return a heuristic bounding box for the
-    most likely face region: upper-center 40% of the image height, center 50% width.
-    This ensures face-swapped images where the face is centered still get inspected.
-    Returns a single (x, y, w, h) box or [] if image is too small.
-    """
-    if bgr is None:
-        return []
-    H, W = bgr.shape[:2]
-    if H < 80 or W < 80:
-        return []
-    # Upper-center region heuristic: faces usually appear in top 60%, centered
-    x = int(W * 0.20)
-    y = int(H * 0.05)
-    w = int(W * 0.60)
-    h = int(H * 0.55)
-    return [(x, y, w, h)]
-
-
-def _face_crops_all(bgr, margin=0.30):
-    if bgr is None or bgr.size == 0:
-        return []
-    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    faces = _detect_faces_robust(g, bgr=bgr)
-    if len(faces) == 0:
-        return []
-    H, W = bgr.shape[:2]
-    out = []
-    # Score up to top 2 faces per frame (handles dialogue scenes and interviews)
-    sorted_faces = sorted(faces, key=lambda r: r[2] * r[3], reverse=True)[:2]
-    filtered_faces = [sorted_faces[0]]
-    if len(sorted_faces) > 1:
-        primary_area = sorted_faces[0][2] * sorted_faces[0][3]
-        sec_area = sorted_faces[1][2] * sorted_faces[1][3]
-        if sec_area >= 0.12 * primary_area or (sorted_faces[1][2] >= 60 and sorted_faces[1][3] >= 60):
-            filtered_faces.append(sorted_faces[1])
-
-    for (x, y, w, h) in filtered_faces:
-        m = int(margin * max(w, h))
-        x0, y0 = max(x - m, 0), max(y - m, 0)
-        x1, y1 = min(x + w + m, W), min(y + h + m, H)
-        crop = Image.fromarray(cv2.cvtColor(bgr[y0:y1, x0:x1], cv2.COLOR_BGR2RGB))
-        box = [x / W, y / H, w / W, h / H]
-        out.append((crop, box))
-    return out
-
-
-def _score_crops(crops):
-    if not crops:
-        return []
-
-    # Priority 1: High-precision Deepfake Face ViT (trained specifically on face swaps)
-    if deepfake_face_model is not None and deepfake_face_proc is not None:
-        try:
-            inputs = deepfake_face_proc(images=[c.convert("RGB") for c in crops], return_tensors="pt").to(DEVICE)
-            with torch.inference_mode():
-                logits = deepfake_face_model(**inputs).logits
-                probs = torch.softmax(logits, dim=-1)
-                # Label 1 is 'Fake', Label 0 is 'Real'
-                fake_probs = probs[:, 1].cpu().float().numpy()
-                return [float(p) for p in fake_probs]
-        except Exception as e:
-            print(f"Deepfake face ViT scoring error: {e}")
-
-    # Priority 2: GenD backbone if available
-    if gend_model is not None:
-        autocast_ctx = torch.amp.autocast("cuda", dtype=torch.float16) if DEVICE == "cuda" else torch.nullcontext()
-        with torch.inference_mode():
-            with autocast_ctx:
-                x = torch.stack([gend_model.feature_extractor.preprocess(c) for c in crops]).to(DEVICE)
-                probs = gend_model(x).softmax(dim=-1)[:, 1].cpu().float().numpy()
-                return [float(p) for p in probs]
-
-    c_scores = face_detector_commfor.predict(crops) if face_detector_commfor is not None else [0.0] * len(crops)
-    n_scores = face_detector_npr.predict(crops) if face_detector_npr is not None else [None] * len(crops)
-
-    combined = []
-    for c, n in zip(c_scores, n_scores):
-        if n is not None:
-            if c > 0.45 or n > 0.45:
-                combined.append(max(c, n))
-            else:
-                combined.append(0.50 * c + 0.50 * n)
-        else:
-            combined.append(float(c))
-    return combined
+app = FastAPI()
 
 
 @app.get("/health")
 def health():
-    return {
-        "ok": True,
-        "device": DEVICE,
-        "deepfake_face_vit": deepfake_face_model is not None,
-        "gend": gend_model is not None,
-        "commfor": face_detector_commfor is not None,
-        "npr": face_detector_npr is not None
-    }
+    return {"ok": MODEL_NAME is not None, "device": DEVICE, "model": MODEL_NAME, "gend": gend_model is not None}
 
 
 @app.post("/score")
 async def score(file: UploadFile = File(...)):
     data = await file.read()
-    name = (file.filename or "").lower()
-    is_video = name.endswith(VIDEO_EXT) or (file.content_type or "").startswith("video/")
-
-    if is_video:
-        frames = _video_frames(data, os.path.splitext(name)[1] or ".mp4", n=12)
-    else:
-        arr = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
-        frames = [arr] if arr is not None else []
-
-    crops = []
-    boxes = []
-    for f in frames:
-        for crop, box in _face_crops_all(f):
-            if crop.size[0] >= 36 and crop.size[1] >= 36:
-                crops.append(crop)
-                boxes.append(box)
-
-    if not crops:
-        return {"gend": None, "faces": 0, "box": None}
-
-    probs = _score_crops(crops)
-    if not probs:
-        return {"gend": None, "faces": 0, "box": None}
-
-    # Determine if heuristic regions were used (set by _face_crops_all internal state via boxes)
-    # Count detected faces (normalized area > 0.003 or dimension > 40px)
-    real_face_count = sum(1 for b in boxes if b is not None and (b[2] * b[3] > 0.003 or (b[2] > 0.04 and b[3] > 0.04)))
-
-    # Video multi-frame consensus: require sustained facial manipulation across multiple frames
-    if is_video and len(probs) >= 4:
-        p_arr = np.array(probs, dtype=np.float64)
-        median_p = float(np.median(p_arr))
-        mean_p = float(np.mean(p_arr))
-        suspicious_ratio = float(np.mean(p_arr > 0.50))
-
-        if suspicious_ratio >= 0.40 and median_p > 0.45:
-            # Persistent manipulation across the video sequence (deepfake face swap)
-            final_score = float(0.60 * median_p + 0.40 * np.mean(sorted(probs, reverse=True)[:max(2, len(probs)//2)]))
-        elif suspicious_ratio >= 0.25 and median_p > 0.35:
-            final_score = float(0.50 * median_p + 0.50 * mean_p)
-        else:
-            # Authentic camera video with momentary motion blur on isolated frames -> prioritize median
-            final_score = float(0.85 * median_p + 0.15 * mean_p)
-    elif is_video and len(probs) >= 2:
-        p_arr = np.array(probs, dtype=np.float64)
-        final_score = float(np.median(p_arr))
-    else:
-        # For images: take mean but also respect the max for high-confidence face manipulation
-        mean_p = float(np.mean(probs))
-        max_p = float(np.max(probs))
-        if max_p > 0.65:
-            final_score = float(0.55 * max_p + 0.45 * mean_p)
-        else:
-            final_score = mean_p
-
-    best_idx = int(np.argmax(probs))
-    # Return real_face_count as detected faces for downstream gating
-    return {
-        "gend": round(final_score, 6),
-        "faces": real_face_count if real_face_count > 0 else len(crops),
-        "box": boxes[best_idx]
-    }
+    return score_media(data, file.filename or "", file.content_type or "")

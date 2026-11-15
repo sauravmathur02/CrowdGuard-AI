@@ -2,7 +2,7 @@
 Universal Synthetic Media Detection Ensemble.
 Exports provenance, pixel forensics, dynamic calibration, and video temporal analysis.
 """
-from .calibration import calibrate_score, load as load_calibration, fit_from_benchmark
+from .calibration import calibrate_score, load as load_calibration
 from .pixel import (
     CommForDetector,
     BFreeDetector,
@@ -23,7 +23,6 @@ from . import gend_client
 __all__ = [
     "calibrate_score",
     "load_calibration",
-    "fit_from_benchmark",
     "CommForDetector",
     "BFreeDetector",
     "CLIPDetector",

@@ -23,7 +23,7 @@ from PIL import ExifTags, Image, ImageChops
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
-from detectors import calibration, gend_client
+from detectors import calibration, ensemble, gend_client
 from detectors.pixel import BFreeDetector, CLIPDetector, CommForDetector, estimate_image_quality
 from detectors.provenance import check_provenance
 from detectors.temporal import temporal_features_bytes
@@ -37,10 +37,10 @@ warnings.filterwarnings("ignore")
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(APP_DIR, "data")
 FEEDBACK_PATH = os.path.join(DATA_DIR, "feedback.jsonl")
-BENCH_PATH = os.path.join(DATA_DIR, "bench_scores.json")
 STATIC_DIR = os.path.join(APP_DIR, "static")
 WEIGHTS_DIR = os.path.join(APP_DIR, "pretrained_weights")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+VIDEO_FRAMES = 16  # frames sampled per video for the deepfake detectors
 
 os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(os.path.join(STATIC_DIR, "uploads"), exist_ok=True)
@@ -107,7 +107,8 @@ def warmup_models():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Starting GenD face-forensics worker...")
-    gend_client.start(timeout=60.0)
+    # GenD CLIP ViT-L/14 (~1.2 GB) takes longer to load than the old fallback ViT.
+    gend_client.start(timeout=240.0)
     print("Executing GPU model warmup...")
     warmup_models()
     yield
@@ -171,6 +172,7 @@ def api_health():
                 "active": getattr(clip_model, "is_available", False),
             },
             "gend_worker": gend_client.get_status(),
+            "calibrated": calibration.is_fitted(),
         },
         "crowd_models": {
             "yolo_detector": {
@@ -184,7 +186,15 @@ def api_health():
                 "labels": weapon_classifier.labels,
             },
         },
-        "ensemble_ready": True,
+        # Ready means: every deepfake detector loaded, the face worker has a model, and the
+        # fusion has been fitted (data/calibration.json).
+        "ensemble_ready": bool(
+            getattr(commfor_model, "model", None) is not None
+            and getattr(bfree_model, "is_available", False)
+            and getattr(clip_model, "is_available", False)
+            and gend_client.is_healthy()
+            and calibration.is_fitted()
+        ),
     }
 
 
@@ -240,9 +250,10 @@ def build_explanation(
     clip: Optional[float] = None,
     quality: Optional[dict] = None,
     confidence_variance: Optional[float] = None,
+    final_score: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Build a rich human-readable forensic report from per-model signals."""
-    T = 0.35
+    """Build a human-readable forensic report from calibrated per-model signals."""
+    T = 0.5  # detector scores are calibrated probabilities, so 0.5 is each model's own decision point
     media = "video" if is_video else "image"
     findings = []
     category = "Authentic"
@@ -276,7 +287,7 @@ def build_explanation(
             category = "Synthetic or Manipulated"
         summary = f"This {media} is likely {category.lower()}."
     else:
-        summary = f"This {media} appears authentic. All detectors remained below the manipulation threshold."
+        summary = f"This {media} appears authentic. The fused detector score stayed below the decision threshold."
         findings.append("No generator fingerprints, diffusion noise patterns, or synthetic spectral signatures were found.")
         if faces_found and g is not None:
             findings.append("Detected facial anatomy, skin texture, and boundary blending appeared natural and consistent.")
@@ -284,25 +295,22 @@ def build_explanation(
             findings.append("Pixel statistics conform to natural optical camera capture physics.")
 
     if is_video:
-        findings.append("Video verdict is evaluated across batched frames and temporal motion/flicker dynamics.")
+        findings.append(f"Video verdict uses the most suspicious half of {VIDEO_FRAMES} frames sampled across the clip.")
 
     if quality and quality.get("is_heavily_compressed"):
-        findings.append(f"Image has noticeable compression (blocking ratio {quality.get('block_ratio', 1.0):.2f}). The dynamic ensemble attenuated high-frequency filters and prioritized semantic ViT backbones to prevent false alarms.")
-    elif quality and not quality.get("is_heavily_compressed") and quality.get("lap_var", 0) > 150:
-        findings.append(f"High-quality uncompressed capture (Laplacian sharpness {quality.get('lap_var', 0):.1f}), allowing full sensitivity across high-frequency forensic layers.")
+        findings.append(f"The {media} is heavily compressed (blocking ratio {quality.get('block_ratio', 1.0):.2f}). Compression removes the fine pixel traces that the detectors rely on, so treat this result with extra caution.")
 
     if confidence_variance is not None:
         if confidence_variance < 0.02:
-            findings.append("Ensemble consensus: High agreement across all vision backbones.")
+            findings.append("Detector agreement: the models largely agree.")
         elif confidence_variance < 0.06:
-            findings.append("Ensemble consensus: Moderate agreement across vision backbones.")
+            findings.append("Detector agreement: moderate.")
         else:
-            findings.append("Ensemble consensus: Discrepancy observed between spectral and semantic models; conservative fusion applied.")
+            findings.append("Detector agreement: the models disagree; the fused score weighs each model by its measured reliability.")
 
-    strong_scores = [c, b_score] + ([g] if g is not None else []) + ([clip] if clip is not None else [])
-    strong = max(strong_scores) if strong_scores else 0.0
-    if is_fake and strong < 0.55 and not is_prov_fake:
-        findings.append("Confidence is moderate; compression or stylized filters can introduce minor artifacts.")
+    strong = final_score if final_score is not None else max([c, b_score] + ([g] if g is not None else []) + ([clip] if clip is not None else []))
+    if is_fake and strong < 0.70 and not is_prov_fake:
+        findings.append("Confidence is moderate; compression or stylized filters can produce similar artifacts.")
 
     face_only = False
     if is_fake and g is not None and g <= T and max(c, b_score) > T and not is_prov_fake:
@@ -314,12 +322,12 @@ def build_explanation(
         findings.append(f"Compression (ELA) in the face area differs from the background (ratio {region['ela_ratio']:.2f}), confirming a pasted or regenerated face.")
         face_only = True
 
-    margin = (1.0 if is_prov_fake else strong) - T
+    p = 1.0 if is_prov_fake else strong
     if not is_fake:
         likelihood = "Unlikely to be manipulated"
-    elif margin > 0.40 or is_prov_fake:
+    elif p >= 0.90:
         likelihood = "Very likely"
-    elif margin > 0.20:
+    elif p >= 0.70:
         likelihood = "Likely"
     else:
         likelihood = "Possible"
@@ -420,7 +428,7 @@ async def execute_pipeline(
     first_frame_img = None
 
     if is_video:
-        frames, timestamps = sample_video_bytes_with_timestamps(contents, n_frames=8)
+        frames, timestamps = sample_video_bytes_with_timestamps(contents, n_frames=VIDEO_FRAMES)
         if not frames:
             return {"success": False, "error": "Could not extract frames. Please upload a valid video."}
         quality = estimate_image_quality(frames[0]) if frames else None
@@ -444,7 +452,21 @@ async def execute_pipeline(
             "message": "Evaluating CommFor ViT-S, B-Free NPR ResNet, CLIP ViT-L/14, and GenD face worker..."
         })
 
-    gend_score, faces_found, face_box = gend_client.score(filename, contents, content_type)
+    face = gend_client.score(filename, contents, content_type)
+    gend_score = face["score"]
+    faces_found = int(face["faces"] or 0)
+    face_box = face["box"]
+    face_checked = face["error"] is None
+
+    warnings_list: List[str] = []
+    if not face_checked:
+        warnings_list.append(f"Face-swap check did not run ({face['error']}). This verdict uses only the whole-image detectors.")
+    elif face.get("model") and "fallback" in str(face.get("model")):
+        warnings_list.append("GenD face weights are missing; a generic fallback face model was used, so face-swap results are less reliable.")
+    if faces_found > 0 and gend_score is None and face_checked:
+        warnings_list.append("A face was detected but could not be scored by the face-forensics model.")
+    if not calibration.is_fitted():
+        warnings_list.append("Detectors are not calibrated (data/calibration.json has no fitted fusion). Run tools/calibrate.py.")
 
     temporal = None
     if is_video:
@@ -453,81 +475,25 @@ async def execute_pipeline(
         except Exception:
             temporal = None
 
-    face_area = (face_box[2] * face_box[3]) if (face_box and len(face_box) == 4) else 0.0
-    has_large_face = bool(faces_found > 0 and face_area > 0.05)
-    has_any_face = bool(faces_found > 0 and face_area > 0.02)
-    face_crop = None
-
     if is_video:
-        c_scores = commfor_model.predict(frames)
-        b_scores = bfree_model.predict(frames)
-        clip_scores = clip_model.predict(frames) if clip_model.is_available else [None] * len(frames)
-
-        if len(c_scores) >= 5:
-            sorted_c = sorted(c_scores)
-            avg_c = float(0.55 * np.mean(sorted_c[1:-1]) + 0.45 * np.median(c_scores))
-        else:
-            avg_c = float(np.mean(c_scores))
-
-        b_valid = [s for s in b_scores if s is not None]
-        if b_valid:
-            if len(b_valid) >= 5:
-                sorted_b = sorted(b_valid)
-                avg_b = float(0.55 * np.mean(sorted_b[1:-1]) + 0.45 * np.median(b_valid))
-            else:
-                avg_b = float(np.mean(b_valid))
-        else:
-            avg_b = None
-
-        clip_valid = [s for s in clip_scores if s is not None]
-        avg_clip = float(np.mean(clip_valid)) if clip_valid else None
+        v = ensemble.score_frames(frames, commfor_model, bfree_model, clip_model)
+        avg_c, avg_b, avg_clip = v["commfor"], v["bfree"], v["clip"]
         frames_analyzed = len(frames)
-
-        if temporal and temporal.get("timeline"):
-            frame_scores = [round(float(item["score"]), 4) for item in temporal["timeline"]]
-        else:
-            frame_scores = [round(float(x if y is None else 0.5 * x + 0.5 * y), 4) for x, y in zip(c_scores, b_scores)]
-
-        gradcam_url = generate_gradcam_heatmap(first_frame_img, commfor_detector=commfor_model, face_box=face_box) if first_frame_img else None
+        frame_scores = [round(float(x), 4) for x in v["frame_fused"] if x is not None]
+        gradcam_url = generate_gradcam_heatmap(first_frame_img, commfor_detector=commfor_model, face_box=None) if first_frame_img else None
     else:
-        if has_any_face and face_box:
-            W, H = img.size
-            x, y, w, h = face_box
-            cx, cy = (x + w / 2.0) * W, (y + h / 2.0) * H
-            crop_w, crop_h = 1.3 * w * W, 1.3 * h * H
-            x0 = max(0, int(cx - crop_w / 2.0))
-            y0 = max(0, int(cy - crop_h / 2.0))
-            x1 = min(W, int(cx + crop_w / 2.0))
-            y1 = min(H, int(cy + crop_h / 2.0))
-            if (x1 - x0) >= 32 and (y1 - y0) >= 32:
-                face_crop = img.crop((x0, y0, x1, y1))
-
-        c_scores = commfor_model.predict([img])
-        b_scores = bfree_model.predict([img], face_crops=[face_crop] if face_crop is not None else None)
-        clip_scores = clip_model.predict([img]) if clip_model.is_available else [None]
-
-        avg_c = float(c_scores[0])
-        avg_b = float(b_scores[0]) if b_scores[0] is not None else None
-        avg_clip = float(clip_scores[0]) if clip_scores[0] is not None else None
+        s = ensemble.score_image(img, commfor_model, bfree_model, clip_model, face_box=face_box)
+        avg_c, avg_b, avg_clip = s["commfor"], s["bfree"], s["clip"]
         frames_analyzed = 1
         frame_scores = []
-
         gradcam_url = generate_gradcam_heatmap(img, commfor_detector=commfor_model, face_box=face_box)
 
+    # Face-vs-background ELA ratio: shown as evidence only, it no longer overrides the verdict.
     region = None
-    if not is_video and img:
-        if face_box:
-            ratio = face_region_ela(img, face_box)
-            region = {"ela_ratio": ratio}
-            g_sus = gend_score or 0.0
-            region["ela_mismatch"] = bool(ratio is not None and (ratio > 2.40 or ratio < 0.40 or (ratio > 1.85 and g_sus > 0.35)))
-        else:
-            center_box = [0.25, 0.05, 0.50, 0.50]
-            ratio = face_region_ela(img, center_box)
-            g_sus = gend_score or 0.0
-            ela_center_mismatch = bool(ratio is not None and (ratio > 2.20 or (ratio > 1.70 and g_sus > 0.30)))
-            if ratio is not None:
-                region = {"ela_ratio": ratio, "ela_mismatch": ela_center_mismatch, "heuristic": True}
+    if not is_video and img is not None and face_box:
+        ratio = face_region_ela(img, face_box)
+        if ratio is not None:
+            region = {"ela_ratio": ratio, "ela_mismatch": bool(ratio > 2.40 or ratio < 0.40)}
 
     display_b = avg_b if avg_b is not None else avg_c
 
@@ -542,258 +508,138 @@ async def execute_pipeline(
 
     if stage_callback:
         await stage_callback(4, "Calibrated Ensemble Verdict & Confidence Variance", "running", {
-            "message": "Fusing context-aware gating weights & computing consensus variance..."
+            "message": "Fusing calibrated detector scores with the fitted logistic model..."
         })
 
-    comp_score = float(quality.get("compression_score", 0.0) if quality else 0.0)
-    is_comp = bool(quality.get("is_heavily_compressed", False) if quality else False)
-
-    if has_large_face and gend_score is not None:
-        w_gend = 0.45
-        w_bfree = 0.35
-        w_commfor = 0.15
-        w_clip = 0.05
-    elif has_any_face and gend_score is not None:
-        w_gend = 0.35
-        w_bfree = 0.30
-        w_commfor = 0.25
-        w_clip = 0.10
-    else:
-        w_commfor = 0.50
-        w_clip = 0.30
-        w_bfree = 0.20
-        w_gend = 0.0
-
-    if is_comp or comp_score > 0.35:
-        reduction = max(0.25, 1.0 - 0.70 * comp_score)
-        reduced_b = w_bfree * reduction
-        freed = w_bfree - reduced_b
-        w_bfree = reduced_b
-        if has_large_face and gend_score is not None:
-            w_gend += freed * 0.50
-            w_commfor += freed * 0.35
-            w_clip += freed * 0.15
-        else:
-            w_commfor += freed * 0.65
-            w_clip += freed * 0.35
-
-    temporal_fake_signal = 0.0
-    if is_video and temporal:
-        # Bounded temporal signal: camera motion or handheld shake should never unilaterally flag media as fake
-        raw_temp = float(temporal.get("temporal_fake_signal") or 0.0)
-        temporal_fake_signal = min(0.60, raw_temp)
-
-    valid_scores = [avg_c]
-    if avg_b is not None:
-        valid_scores.append(avg_b)
-    if avg_clip is not None:
-        valid_scores.append(avg_clip)
-    if gend_score is not None:
-        valid_scores.append(gend_score)
+    valid_scores = [x for x in (avg_c, avg_b, avg_clip, gend_score) if x is not None]
     confidence_variance = float(np.var(valid_scores)) if len(valid_scores) > 1 else 0.0
 
+    scene_scores = {"commfor": avg_c, "bfree": avg_b, "clip": avg_clip}
+    media_kind = "video" if is_video else "image"
+    fused_scene = ensemble.fuse(scene_scores, media=media_kind)
+    fused_all = ensemble.fuse({**scene_scores, "gend": gend_score}, media=media_kind)
+    threshold = float(fused_all["threshold"])
+    prov_score = 1.0 if is_prov_fake else 0.0
+
+    def _likelihood(p: float, fake: bool) -> str:
+        if not fake:
+            return "Unlikely to be manipulated"
+        return "Very likely" if p >= 0.90 else ("Likely" if p >= 0.70 else "Possible")
+
+    def _neutral_result(prediction: str, category: str, summary: str, findings: List[str]) -> Dict[str, Any]:
+        return {
+            "success": True,
+            "mode": mode,
+            "prediction": prediction,
+            "score": 0.0,
+            "confidence": "N/A",
+            "confidence_variance": round(confidence_variance, 6),
+            "commfor_score": round(avg_c, 6),
+            "bfree_score": round(display_b, 6),
+            "clip_score": round(avg_clip, 6) if avg_clip is not None else None,
+            "prov_score": prov_score,
+            "frames_analyzed": int(frames_analyzed),
+            "temporal": temporal,
+            "gend_score": None,
+            "faces_found": faces_found,
+            "face_model": face.get("model"),
+            "face_checked": face_checked,
+            "warnings": warnings_list,
+            "fusion": None,
+            "explanation": {"category": category, "summary": summary, "findings": findings, "likelihood": "Inconclusive"},
+            "media_type": "video" if is_video else "image",
+            "frame_scores": frame_scores,
+            "exif": exif,
+            "ela": ela_url,
+            "residual_map": residual_url,
+            "gradcam": gradcam_url,
+            "attention_heatmap": gradcam_url,
+            "face_box": None,
+            "region": None,
+            "quality": quality,
+        }
+
+    async def _finish_neutral(prediction: str, category: str, summary: str, findings: List[str]):
+        if stage_callback:
+            await stage_callback(4, "Calibrated Ensemble Verdict & Confidence Variance", "completed", {
+                "final_score": 0.0, "prediction": prediction, "confidence_variance": round(confidence_variance, 5),
+            })
+        return _neutral_result(prediction, category, summary, findings)
+
     if mode == "deepfake":
-        inprocess_face_found = faces_found > 0
-        inprocess_face_box = face_box
-        if not inprocess_face_found and not is_video and img is not None:
-            try:
-                _arr = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
-                if _arr is not None:
-                    _gray = cv2.cvtColor(_arr, cv2.COLOR_BGR2GRAY)
-                    _casc = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-                    _faces = _casc.detectMultiScale(_gray, scaleFactor=1.07, minNeighbors=2, minSize=(28, 28))
-                    if len(_faces) > 0:
-                        _H, _W = _arr.shape[:2]
-                        _x, _y, _fw, _fh = max(_faces, key=lambda r: r[2] * r[3])
-                        inprocess_face_found = True
-                        inprocess_face_box = [_x / _W, _y / _H, _fw / _W, _fh / _H]
-            except Exception:
-                pass
+        media = "video" if is_video else "image"
+        if not face_checked:
+            return await _finish_neutral(
+                "Inconclusive", "Face Check Unavailable",
+                f"The face-swap check could not run, so this {media} was not evaluated for deepfakes.",
+                [face["error"] or "Face-forensics worker unavailable.",
+                 "Retry, or use 'AI-Generated' / 'Auto' mode for whole-image analysis."],
+            )
+        if faces_found == 0:
+            return await _finish_neutral(
+                "No Face Detected", "No Face Detected",
+                "Deepfake analysis requires a visible human face, but no face was found.",
+                ["The face detector found no face of at least 40 px in this media.",
+                 "Deepfake mode evaluates face swaps and facial manipulation only.",
+                 "Switch to 'AI-Generated' or 'Auto' mode to test full-scene synthesis."],
+            )
+        if gend_score is None:
+            return await _finish_neutral(
+                "Inconclusive", "Face Not Scored",
+                "A face was found but the face-forensics model could not score it.",
+                ["Retry with a larger or clearer face."],
+            )
 
-        if not inprocess_face_found:
-            final_res = {
-                "success": True,
-                "mode": "deepfake",
-                "prediction": "No Face Detected",
-                "score": 0.0,
-                "confidence": "N/A",
-                "confidence_variance": round(confidence_variance, 6),
-                "commfor_score": round(avg_c, 6),
-                "bfree_score": round(display_b, 6),
-                "clip_score": round(avg_clip, 6) if avg_clip is not None else None,
-                "prov_score": 0.0,
-                "frames_analyzed": int(frames_analyzed),
-                "temporal": temporal,
-                "gend_score": None,
-                "faces_found": 0,
-                "explanation": {
-                    "category": "No Face Detected",
-                    "summary": "Deepfake analysis requires a visible human face, but no face was found.",
-                    "findings": [
-                        "The face detection locator found 0 faces in this media.",
-                        "Deepfake mode specifically evaluates facial blending boundaries and identity replacement.",
-                        "Switch to 'AI-Generated' or 'Auto' mode to test full-scene synthesis.",
-                    ],
-                    "likelihood": "Inconclusive",
-                },
-                "media_type": "video" if is_video else "image",
-                "frame_scores": frame_scores,
-                "exif": exif,
-                "ela": ela_url,
-                "residual_map": residual_url,
-                "gradcam": gradcam_url,
-                "attention_heatmap": gradcam_url,
-                "face_box": None,
-                "region": None,
-                "quality": quality,
-            }
-            if stage_callback:
-                await stage_callback(4, "Calibrated Ensemble Verdict & Confidence Variance", "completed", {
-                    "final_score": 0.0,
-                    "prediction": "No Face Detected",
-                    "confidence_variance": round(confidence_variance, 5),
-                })
-            return final_res
-
-        g_score = gend_score if gend_score is not None else 0.0
-        if display_b > 0.50:
-            final_score = float(0.60 * g_score + 0.40 * display_b)
-        else:
-            final_score = g_score
-
-        if region and region.get("ela_mismatch") and final_score > 0.45:
-            final_score = max(final_score, 0.72)
-
-        # Standard balanced classification boundary
-        threshold = 0.50
+        final_score = float(fused_all["p_fake"])
+        fusion_used = fused_all
         is_fake = final_score > threshold
-        confidence = final_score if is_fake else (1.0 - final_score)
-        prov_score = 0.0
-
         findings = []
         if is_fake:
             category = "Deepfake (Face Swap)"
-            summary = f"High probability: A face in this {'video' if is_video else 'image'} has been replaced or manipulated by AI."
-            if g_score > threshold:
-                findings.append("The face-forensics model detected facial blending seams, skin boundary artifacts, or identity morphing.")
-            if display_b > threshold:
-                findings.append("The face crop analysis identified synthetic pixel transitions along the facial perimeter.")
-            if region and region.get("ela_mismatch"):
-                findings.append(f"Compression (ELA) in the face region differs significantly from the background (ratio {region['ela_ratio']:.2f}), confirming a pasted or regenerated face.")
+            summary = f"A face in this {media} shows signs of being replaced or manipulated by AI."
+            if gend_score > 0.5:
+                findings.append(f"GenD face model: {gend_score * 100:.0f}% probability that the face is manipulated.")
+            if max(avg_c, display_b) > 0.5:
+                findings.append("Whole-image detectors also found synthetic pixel patterns.")
         else:
             category = "Authentic Face"
-            summary = f"This {'video' if is_video else 'image'} displays natural, authentic facial anatomy."
-            findings.append("No face-swap boundary lines, blending seams, or facial identity anomalies were found.")
-            findings.append("Facial textures, skin pore continuity, and compression match the surrounding background naturally.")
-
-        margin = final_score - threshold
-        likelihood = "Very likely" if margin > 0.30 else ("Likely" if margin > 0.10 else "Possible")
-        if not is_fake:
-            likelihood = "Unlikely to be manipulated"
-
-        explanation = {"category": category, "summary": summary, "findings": findings, "likelihood": likelihood}
+            summary = f"No sign of face replacement or facial manipulation was found in this {media}."
+            findings.append(f"GenD face model: {gend_score * 100:.0f}% probability of manipulation (below the decision threshold).")
+        if region and region.get("ela_mismatch"):
+            findings.append(f"Compression (ELA) in the face region differs from the background (ratio {region['ela_ratio']:.2f}).")
+        explanation = {"category": category, "summary": summary, "findings": findings, "likelihood": _likelihood(final_score, is_fake)}
 
     elif mode == "ai_generated":
-        if is_prov_fake:
-            final_score = 1.0
-            prov_score = 1.0
-        else:
-            synth_models = [("commfor", avg_c, w_commfor), ("bfree", display_b, w_bfree)]
-            if avg_clip is not None:
-                synth_models.append(("clip", avg_clip, w_clip))
-            tot_sw = sum(w for _, _, w in synth_models) or 1.0
-            final_score = sum(s * (w / tot_sw) for _, s, w in synth_models)
-            prov_score = 0.0
-
-        threshold = 0.38
+        fusion_used = fused_scene
+        final_score = 1.0 if is_prov_fake else float(fused_scene["p_fake"])
         is_fake = final_score > threshold
-        confidence = final_score if is_fake else (1.0 - final_score)
-
+        media = "video" if is_video else "image"
         findings = []
         if is_prov_fake:
             findings.append("C2PA content credentials or embedded metadata explicitly declare this file as AI-generated.")
         if is_fake:
             category = "AI-Generated (Synthetic)"
-            summary = f"Detected: This {'video' if is_video else 'image'} was generated from scratch by an AI model (Midjourney, DALL-E, Stable Diffusion, Flux, etc.)."
-            findings.append("The Community Forensics Vision Transformer detected generative pixel fingerprints and spectral anomalies.")
-            if avg_clip is not None and avg_clip > threshold:
-                findings.append("UniversalFakeDetect (CLIP ViT-L/14) confirmed latent vision-language synthetic signatures.")
-            if display_b > threshold:
-                findings.append("Secondary spectral analysis confirmed synthetic frequency distributions across the frame.")
+            summary = f"This {media} shows signs of being generated by an AI model."
+            for name, val in (("Community Forensics ViT", avg_c), ("NPR ResNet-50", avg_b), ("UniversalFakeDetect CLIP", avg_clip)):
+                if val is not None and val > 0.5:
+                    findings.append(f"{name}: {val * 100:.0f}% probability of synthetic content.")
         else:
             category = "Authentic Capture"
-            summary = f"This {'video' if is_video else 'image'} conforms to authentic camera capture physics."
-            findings.append("No generative AI fingerprints, diffusion noise patterns, or synthetic frequency signatures were detected.")
-            findings.append("Pixel statistics conform to natural optical camera sensor physics.")
-
-        margin = final_score - threshold
-        likelihood = "Very likely" if (margin > 0.30 or is_prov_fake) else ("Likely" if margin > 0.10 else "Possible")
-        if not is_fake:
-            likelihood = "Unlikely to be manipulated"
-
-        explanation = {"category": category, "summary": summary, "findings": findings, "likelihood": likelihood}
+            summary = f"No generative-AI fingerprints were found in this {media}."
+            findings.append("The whole-image detectors stayed below the calibrated decision threshold.")
+        explanation = {"category": category, "summary": summary, "findings": findings, "likelihood": _likelihood(final_score, is_fake)}
 
     else:
-        active_models = [("commfor", avg_c, w_commfor)]
-        if avg_b is not None:
-            active_models.append(("bfree", avg_b, w_bfree))
-        if avg_clip is not None and w_clip > 0:
-            active_models.append(("clip", avg_clip, w_clip))
-        if gend_score is not None and faces_found > 0 and w_gend > 0:
-            active_models.append(("gend", gend_score, w_gend))
-        if is_video and temporal_fake_signal > 0.0:
-            active_models.append(("temporal", temporal_fake_signal, 0.35))
-
-        tot_w = sum(w for _, _, w in active_models) or 1.0
-        pixel_final = sum(s * (w / tot_w) for _, s, w in active_models)
-        threshold = 0.40
-
-        pix_scores = [avg_c] + ([avg_b] if avg_b is not None else []) + ([avg_clip] if avg_clip is not None else [])
-        strong_consensus = len(pix_scores) >= 2 and sum(1 for s in pix_scores if s > 0.50) >= 2
-        face_manip = gend_score is not None and gend_score > 0.70 and has_large_face
-        face_swap_sus = gend_score is not None and gend_score > 0.65 and (has_any_face or faces_found > 0)
-        face_sus = gend_score is not None and gend_score > 0.55 and faces_found > 0
-        ela_flag = bool(region and region.get("ela_mismatch"))
-
-        if strong_consensus:
-            pixel_final = max(pixel_final, max(pix_scores) * 0.92)
-            threshold = 0.45
-        elif face_manip:
-            pixel_final = max(pixel_final, gend_score * 0.92)
-            threshold = 0.45
-        elif face_swap_sus:
-            pixel_final = max(pixel_final, gend_score * 0.90)
-            threshold = 0.48
-        elif face_sus and ela_flag:
-            pixel_final = max(pixel_final, max(gend_score, 0.72))
-            threshold = 0.45
-        elif max(pix_scores) > 0.88:
-            min_s = min(pix_scores)
-            if min_s < 0.12 and not has_large_face and not is_video:
-                pixel_final = 0.50 * max(pix_scores) + 0.50 * min_s
-            else:
-                pixel_final = max(pixel_final, max(pix_scores) * 0.85)
-                threshold = 0.45
-        elif len(pix_scores) >= 2 and max(pix_scores) > 0.55 and min(pix_scores) < 0.15 and not is_video and not has_large_face:
-            pixel_final = min(pixel_final, 0.36)
-            threshold = 0.40
-        else:
-            threshold = 0.48
-
-        if is_prov_fake:
-            final_score = max(pixel_final, 0.99)
-            prov_score = 1.0
-        else:
-            final_score = pixel_final
-            prov_score = 0.0
-
+        fusion_used = fused_all
+        final_score = max(float(fused_all["p_fake"]), 0.99) if is_prov_fake else float(fused_all["p_fake"])
         is_fake = final_score > threshold
-        confidence = final_score if is_fake else (1.0 - final_score)
         explanation = build_explanation(
             is_fake, is_video, avg_c, display_b, gend_score, is_prov_fake,
             prov_result, faces_found, region, clip=avg_clip, quality=quality,
-            confidence_variance=confidence_variance,
+            confidence_variance=confidence_variance, final_score=final_score,
         )
+
+    confidence = final_score if is_fake else (1.0 - final_score)
 
     if stage_callback:
         await stage_callback(4, "Calibrated Ensemble Verdict & Confidence Variance", "completed", {
@@ -816,7 +662,17 @@ async def execute_pipeline(
         "frames_analyzed": int(frames_analyzed),
         "temporal": temporal,
         "gend_score": round(gend_score, 6) if gend_score is not None else None,
+        "gend_frame_scores": face.get("frame_scores") or [],
         "faces_found": faces_found,
+        "face_model": face.get("model"),
+        "face_checked": face_checked,
+        "warnings": warnings_list,
+        "fusion": {
+            "model": fusion_used["model"],
+            "threshold": threshold,
+            "calibrated": fusion_used["calibrated"],
+            "contributions": fusion_used["contributions"],
+        },
         "explanation": explanation,
         "media_type": "video" if is_video else "image",
         "frame_scores": frame_scores,
@@ -829,7 +685,6 @@ async def execute_pipeline(
         "region": region,
         "quality": quality,
     }
-
 
 # ── FASTAPI ROUTES ─────────────────────────────────────────────────────────
 @app.get("/", include_in_schema=False)
@@ -1191,6 +1046,9 @@ async def incident_investigation(file: UploadFile = File(...)):
 
     # 1. Run Deepfake Media Forensics
     deepfake_result = await execute_pipeline(contents, filename, content_type, mode="auto")
+    if not deepfake_result.get("success"):
+        # Without a forensics result the media must not be reported as authentic.
+        return {"success": False, "error": deepfake_result.get("error", "Media forensics analysis failed.")}
 
     # 2. Run Crowd Surveillance on the media
     is_video = (
@@ -1290,6 +1148,7 @@ async def incident_investigation(file: UploadFile = File(...)):
             "confidence": deepfake_result.get("confidence"),
             "category": deepfake_result.get("explanation", {}).get("category"),
             "findings": deepfake_result.get("explanation", {}).get("findings", []),
+            "warnings": deepfake_result.get("warnings", []),
             "ela_heatmap": deepfake_result.get("ela"),
             "gradcam_heatmap": deepfake_result.get("gradcam"),
             "residual_map": deepfake_result.get("residual_map"),
@@ -1302,24 +1161,18 @@ async def incident_investigation(file: UploadFile = File(...)):
 # ── ACTIVE LEARNING FEEDBACK & BENCHMARK ACCURACY ENDPOINT ─────────────────
 def compute_benchmark_and_feedback_stats() -> Dict[str, Any]:
     stats = {"benchmarks": {}, "feedback": {"total_samples": 0, "fake_samples": 0, "real_samples": 0}}
-    if os.path.isfile(BENCH_PATH):
-        try:
-            with open(BENCH_PATH, "r", encoding="utf-8") as f:
-                b_data = json.load(f)
-            labels = np.array(b_data.get("label", []))
-            if len(labels) > 0:
-                c_preds = (np.array(b_data.get("commfor", [])) > 0.40).astype(int)
-                b_preds = (np.array(b_data.get("bfree", [])) > 0.40).astype(int)
-                ens_scores = 0.55 * np.array(b_data.get("bfree", [])) + 0.45 * np.array(b_data.get("commfor", []))
-                ens_preds = (ens_scores > 0.38).astype(int)
-                stats["benchmarks"] = {
-                    "total_samples": len(labels),
-                    "commfor_accuracy": round(float(np.mean(c_preds == labels)), 4),
-                    "bfree_accuracy": round(float(np.mean(b_preds == labels)), 4),
-                    "ensemble_accuracy": round(float(np.mean(ens_preds == labels)), 4),
-                }
-        except Exception as e:
-            stats["benchmarks"]["error"] = str(e)
+    # Held-out accuracy measured by tools/calibrate.py (stored in calibration.json -> "eval").
+    ev = (calibration.load() or {}).get("eval") or {}
+    if ev:
+        allm = ev.get("ALL", {}).get("new_fusion", {})
+        det = ev.get("single_detectors", {})
+        stats["benchmarks"] = {
+            "total_samples": allm.get("n"),
+            "ensemble_balanced_accuracy": allm.get("balanced_acc"),
+            "ensemble_fake_caught": allm.get("fake_caught"),
+            "ensemble_real_correct": allm.get("real_correct"),
+            "detector_auc": {k: v.get("auc") for k, v in det.items()},
+        }
 
     if os.path.isfile(FEEDBACK_PATH):
         try:

@@ -71,12 +71,17 @@ export default function ForensicsView() {
   };
 
   const isFake = result?.prediction === "Fake";
-  // For Fake: show manipulation probability (e.g. 92%). For Real: show authentic confidence (e.g. 99% or 100%).
-  const displayScore = result
+  // "No Face Detected" / "Inconclusive" carry no verdict, so they must not render as "Authentic".
+  const isNeutral = !!result && result.prediction !== "Fake" && result.prediction !== "Real";
+  // For Fake: show manipulation probability. For Real: show authentic confidence.
+  const displayScore = result && !isNeutral
     ? isFake
       ? Math.round(result.score * 100)
       : Math.max(1, Math.round((1 - result.score) * 100))
     : 0;
+  const tone = isNeutral ? "neutral" : isFake ? "fake" : "real";
+  const toneBanner = { fake: "bg-rose-950/30 border-rose-500/40", real: "bg-emerald-950/30 border-emerald-500/40", neutral: "bg-amber-950/20 border-amber-500/40" }[tone];
+  const toneBadge = { fake: "bg-rose-500/20 text-rose-300 border-rose-500/30", real: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30", neutral: "bg-amber-500/15 text-amber-300 border-amber-500/30" }[tone];
 
   return (
     <div className="space-y-6">
@@ -211,28 +216,18 @@ export default function ForensicsView() {
             <div className="space-y-4">
               {/* Verdict Banner */}
               <div
-                className={`p-5 rounded-2xl border ${isFake
-                  ? "bg-rose-950/30 border-rose-500/40"
-                  : "bg-emerald-950/30 border-emerald-500/40"
-                  }`}
+                className={`p-5 rounded-2xl border ${toneBanner}`}
               >
                 <div className="flex items-start gap-4">
-                  <div className={`w-20 h-20 rounded-xl flex flex-col items-center justify-center border shrink-0 ${
-                    isFake
-                      ? "bg-rose-500/20 text-rose-300 border-rose-500/30"
-                      : "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
-                  }`}>
-                    <span className="text-2xl font-black">{displayScore}%</span>
+                  <div className={`w-20 h-20 rounded-xl flex flex-col items-center justify-center border shrink-0 ${toneBadge}`}>
+                    <span className="text-2xl font-black">{isNeutral ? "—" : `${displayScore}%`}</span>
                     <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">
-                      {isFake ? "Fake Risk" : "Authentic"}
+                      {isNeutral ? "No Verdict" : isFake ? "Fake Risk" : "Authentic"}
                     </span>
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className={`text-xs font-bold uppercase px-2.5 py-0.5 rounded-full border ${isFake
-                        ? "bg-rose-500/20 text-rose-400 border-rose-500/30"
-                        : "bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
-                        }`}>
+                      <span className={`text-xs font-bold uppercase px-2.5 py-0.5 rounded-full border ${toneBadge}`}>
                         {result.prediction}
                       </span>
                       <span className="text-xs text-slate-400">{result.explanation.category} · {result.explanation.likelihood}</span>
@@ -240,7 +235,20 @@ export default function ForensicsView() {
                     </div>
                     <p className="text-base font-bold text-white mt-1">{result.explanation.summary}</p>
 
+                    {/* Warnings: checks that did not run or ran in a degraded state */}
+                    {result.warnings && result.warnings.length > 0 && (
+                      <div className="mt-3 space-y-1">
+                        {result.warnings.map((w, i) => (
+                          <div key={i} className="flex items-start gap-2 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-2.5 py-1.5">
+                            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                            <span>{w}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
                     {/* Score bar */}
+                    {!isNeutral && (
                     <div className="mt-3">
                       <div className="flex justify-between text-xs mb-1">
                         <span className="text-slate-400">
@@ -257,6 +265,7 @@ export default function ForensicsView() {
                         />
                       </div>
                     </div>
+                    )}
 
                     {/* Findings */}
                     <div className="mt-3 space-y-1">
@@ -275,12 +284,12 @@ export default function ForensicsView() {
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 {[
                   { name: "CommFor ViT-S", value: result.commfor_score, icon: Cpu, color: "text-sky-400", desc: "4,803 Generators" },
-                  { name: "B-Free / NPR", value: result.bfree_score, icon: Layers, color: "text-indigo-400", desc: "Pixel Neighbor" },
+                  { name: "NPR ResNet-50", value: result.bfree_score, icon: Layers, color: "text-indigo-400", desc: "Pixel Neighbor" },
                   { name: "CLIP ViT-L/14", value: result.clip_score, icon: Eye, color: "text-purple-400", desc: "Semantic Head" },
-                  { name: "GenD Face", value: result.gend_score, icon: Drama, color: "text-amber-400", desc: result.faces_found > 0 ? `${result.faces_found} Face(s)` : "No Face Found" },
+                  { name: "GenD Face", value: result.gend_score, icon: Drama, color: "text-amber-400", desc: result.face_checked === false ? "Not Checked" : result.faces_found > 0 ? `${result.faces_found} Face(s)` : "No Face Found" },
                 ].map(({ name, value, icon: Icon, color, desc }) => {
                   const hasVal = value !== null && value !== undefined;
-                  const isModFake = hasVal && value > 0.40;
+                  const isModFake = hasVal && value > 0.5;
                   const modPercent = hasVal ? Math.round(value * 100) : null;
                   const modAuthPercent = hasVal ? Math.round((1 - value) * 100) : null;
 
