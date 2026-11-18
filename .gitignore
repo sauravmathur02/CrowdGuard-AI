@@ -186,3 +186,20 @@ htmlcov/
 # ==========================================
 !frontend/public/static/samples/
 !frontend/public/static/samples/*
+!docs/screenshots/
+!docs/screenshots/*.png
+!docs/report/images/
+!docs/report/images/*.png
+!docs/report/overleaf/images/
+!docs/report/overleaf/images/*.png
+# Frontend source lives in src/lib (the Python "lib/" rule above must not hide it)
+!frontend/src/lib/
+!frontend/src/lib/**
+# ==========================================
+# Local-only files
+# ==========================================
+New folder/
+CrowdGuardAI/data/eval_cache/
+CrowdGuardAI/detectors/B-Free/code/weights/*.zip
+CrowdGuardAI/detectors/B-Free/code/weights/**/*.pth
+docs/report/*.zip

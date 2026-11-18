@@ -1,3 +1,5 @@
+> **Note:** this is the original Review 1 specification. The deepfake pipeline was rebuilt afterwards (B-Free replaced NPR, real GenD face model, calibrated fusion, live dual-investigation pipeline, custom weapon weights). For the current design and measured results see [docs/report/CrowdGuardAI_Report.md](docs/report/CrowdGuardAI_Report.md) and [README.md](README.md).
+
 # CrowdGuard AI — Crowd Anomaly & Deepfake Detection System
 ## End-to-End System Project Report & Technical Specification
 

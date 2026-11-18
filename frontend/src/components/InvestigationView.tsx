@@ -15,8 +15,31 @@ import {
   CheckCircle,
   Eye,
   FileCode,
+  Gavel,
 } from "lucide-react";
-import { runInvestigation, InvestigationResponse } from "@/lib/api";
+import { runInvestigationStream, InvestigationResponse, StageEvent, asImageSrc } from "@/lib/api";
+import MediaPreview from "./MediaPreview";
+import PipelineTracker, { PipelineStep } from "./PipelineTracker";
+
+const INITIAL_STEPS: PipelineStep[] = [
+  { title: "Crowd Surveillance", subtitle: "YOLOv8 people & weapons", status: "pending", icon: Users },
+  { title: "Deepfake Forensics", subtitle: "CommFor · B-Free · CLIP · GenD", status: "pending", icon: Cpu },
+  { title: "Cross-Verification", subtitle: "Combined incident verdict", status: "pending", icon: Gavel },
+];
+
+const isVideoFile = (f: File | null) => !!f && (f.type.startsWith("video/") || /\.(mp4|mov|avi|mkv|webm)$/i.test(f.name));
+
+function describe(evt: StageEvent): string | undefined {
+  const d = evt.details || {};
+  if (evt.status === "failed") return d.message || "Stage failed";
+  if (evt.stage === 1 && evt.status === "completed")
+    return `${d.frames_analyzed} frame(s) · peak ${d.peak_crowd} people · ${d.weapons?.length ? `weapons: ${d.weapons.join(", ")}` : "no weapons"}`;
+  if (evt.stage === 2 && evt.status === "completed")
+    return `${d.prediction} · ${(Number(d.score) * 100).toFixed(1)}% fake probability · ${d.faces_found ?? 0} face(s)`;
+  if (evt.stage === 2 && d.substage_name) return `${d.substage}/4 ${d.substage_name}${d.substage_status === "completed" ? " ✓" : "…"}`;
+  if (evt.stage === 3 && evt.status === "completed") return `${d.threat_level} · ${d.verdict}`;
+  return d.message;
+}
 
 export default function InvestigationView() {
   const [file, setFile] = useState<File | null>(null);
@@ -25,37 +48,57 @@ export default function InvestigationView() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<InvestigationResponse | null>(null);
   const [activeArtifactTab, setActiveArtifactTab] = useState<"ela" | "gradcam" | "residual">("ela");
+  const [steps, setSteps] = useState<PipelineStep[]>(INITIAL_STEPS);
+  const [elapsed, setElapsed] = useState(0);
+  const [keyframe, setKeyframe] = useState(0);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const selected = e.target.files[0];
-      setFile(selected);
-      setError(null);
-      if (selected.type.startsWith("image/")) {
-        setPreviewUrl(URL.createObjectURL(selected));
-      } else {
-        setPreviewUrl(null);
-      }
-    }
+  const selectFile = (selected: File) => {
+    setFile(selected);
+    setError(null);
+    setResult(null);
+    setSteps(INITIAL_STEPS);
+    setPreviewUrl(URL.createObjectURL(selected));
   };
 
-  const handleRunInvestigation = async () => {
-    if (!file) return;
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) selectFile(e.target.files[0]);
+  };
+
+  const investigate = async (target: File) => {
     setLoading(true);
     setError(null);
+    setResult(null);
+    setKeyframe(0);
+    setSteps(INITIAL_STEPS);
+    setElapsed(0);
+    const t0 = Date.now();
+    const timer = setInterval(() => setElapsed((Date.now() - t0) / 1000), 500);
     try {
-      const res = await runInvestigation(file);
+      const res = await runInvestigationStream(target, (evt) => {
+        if (evt.event !== "stage" || !evt.stage) return;
+        setSteps((prev) =>
+          prev.map((s, i) => {
+            if (i + 1 !== evt.stage) return s;
+            return { ...s, status: evt.status === "failed" ? "failed" : evt.status === "completed" ? "completed" : "running", detail: describe(evt) ?? s.detail };
+          })
+        );
+      });
       setResult(res);
     } catch (err: any) {
       setError(err?.message || "Investigation failed to execute.");
+      setSteps((prev) => prev.map((s) => (s.status === "running" ? { ...s, status: "failed" } : s)));
     } finally {
+      clearInterval(timer);
       setLoading(false);
     }
   };
 
+  const handleRunInvestigation = () => {
+    if (file) investigate(file);
+  };
+
   const loadSample = async (filename: string) => {
     try {
-      setLoading(true);
       setError(null);
       const res = await fetch(`/static/samples/${filename}`);
       if (!res.ok) {
@@ -63,14 +106,10 @@ export default function InvestigationView() {
       }
       const blob = await res.blob();
       const sampleFile = new File([blob], filename, { type: blob.type || "image/png" });
-      setFile(sampleFile);
-      setPreviewUrl(URL.createObjectURL(blob));
-      const invRes = await runInvestigation(sampleFile);
-      setResult(invRes);
+      selectFile(sampleFile);
+      await investigate(sampleFile);
     } catch (err: any) {
       setError(err?.message || `Failed to run sample ${filename}`);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -132,6 +171,13 @@ export default function InvestigationView() {
             >
               Test Authentic Feed (R.jpg)
             </button>
+            <button
+              onClick={() => loadSample("surveillance_sample.mp4")}
+              className="px-3 py-2 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
+              disabled={loading}
+            >
+              Test CCTV Video
+            </button>
           </div>
         </div>
 
@@ -189,6 +235,21 @@ export default function InvestigationView() {
           )}
         </div>
       </div>
+
+      {/* Live pipeline + uploaded media */}
+      {(loading || result || steps.some((s) => s.status !== "pending")) && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div className="lg:col-span-8">
+            <PipelineTracker steps={steps} elapsed={loading || result ? elapsed : undefined} />
+          </div>
+          <div className="lg:col-span-4">
+            <MediaPreview url={previewUrl} isVideo={isVideoFile(file)} name={file?.name} title="Incident Footage" maxHeight="max-h-56" />
+          </div>
+        </div>
+      )}
+      {!loading && !result && file && steps.every((s) => s.status === "pending") && (
+        <MediaPreview url={previewUrl} isVideo={isVideoFile(file)} name={file.name} title="Selected Footage" maxHeight="max-h-72" />
+      )}
 
       {/* Investigation Results */}
       {result && (
@@ -367,21 +428,21 @@ export default function InvestigationView() {
                   <div className="h-60 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-center overflow-hidden relative">
                     {activeArtifactTab === "ela" && result.media_authenticity.ela_heatmap && (
                       <img
-                        src={`data:image/jpeg;base64,${result.media_authenticity.ela_heatmap}`}
+                        src={asImageSrc(result.media_authenticity.ela_heatmap)}
                         alt="ELA Heatmap"
                         className="w-full h-full object-contain"
                       />
                     )}
                     {activeArtifactTab === "gradcam" && result.media_authenticity.gradcam_heatmap && (
                       <img
-                        src={`data:image/jpeg;base64,${result.media_authenticity.gradcam_heatmap}`}
+                        src={asImageSrc(result.media_authenticity.gradcam_heatmap)}
                         alt="GradCAM Attention"
                         className="w-full h-full object-contain"
                       />
                     )}
                     {activeArtifactTab === "residual" && result.media_authenticity.residual_map && (
                       <img
-                        src={`data:image/jpeg;base64,${result.media_authenticity.residual_map}`}
+                        src={asImageSrc(result.media_authenticity.residual_map)}
                         alt="Noise Residual"
                         className="w-full h-full object-contain"
                       />
@@ -451,21 +512,35 @@ export default function InvestigationView() {
                   </div>
 
                   <div className="h-60 rounded-xl bg-slate-950 border border-slate-800 overflow-hidden relative">
-                    {result.crowd_intelligence.annotated_samples.length > 0 ? (
-                      <div className="w-full h-full flex flex-col">
-                        <img
-                          src={`data:image/jpeg;base64,${result.crowd_intelligence.annotated_samples[0].image}`}
-                          alt="Annotated Crowd"
-                          className="w-full h-full object-contain"
-                        />
-                        <div className="absolute bottom-2 left-2 right-2 px-3 py-1.5 rounded-lg bg-slate-900/80 backdrop-blur-md border border-slate-700/60 flex items-center justify-between text-xs text-slate-300">
-                          <span>Timestamp: {result.crowd_intelligence.annotated_samples[0].timestamp}</span>
-                          <span className="font-semibold text-cyan-400">
-                            Crowd: {result.crowd_intelligence.annotated_samples[0].crowd_count} | Threat: {result.crowd_intelligence.annotated_samples[0].risk_level}
-                          </span>
+                    {result.crowd_intelligence.annotated_samples.length > 0 ? (() => {
+                      const samples = result.crowd_intelligence.annotated_samples;
+                      const k = Math.min(keyframe, samples.length - 1);
+                      const s = samples[k];
+                      return (
+                        <div className="w-full h-full flex flex-col">
+                          <img src={asImageSrc(s.image)} alt="Annotated Crowd" className="w-full h-full object-contain" />
+                          <div className="absolute bottom-2 left-2 right-2 px-3 py-1.5 rounded-lg bg-slate-900/80 backdrop-blur-md border border-slate-700/60 flex items-center justify-between gap-2 text-xs text-slate-300">
+                            <span>Timestamp: {s.timestamp}</span>
+                            {samples.length > 1 && (
+                              <div className="flex gap-1">
+                                {samples.map((_, i) => (
+                                  <button
+                                    key={i}
+                                    onClick={() => setKeyframe(i)}
+                                    className={`w-6 h-5 rounded text-[10px] font-mono ${i === k ? "bg-cyan-500/30 text-cyan-200" : "bg-slate-800 text-slate-400 hover:text-white"}`}
+                                  >
+                                    {i + 1}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                            <span className="font-semibold text-cyan-400">
+                              Crowd: {s.crowd_count} | Threat: {s.risk_level}
+                            </span>
+                          </div>
                         </div>
-                      </div>
-                    ) : (
+                      );
+                    })() : (
                       <div className="w-full h-full flex items-center justify-center text-xs text-slate-500">
                         No annotated frames captured
                       </div>

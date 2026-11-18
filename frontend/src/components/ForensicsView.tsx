@@ -15,7 +15,8 @@ import {
   FileSearch,
   ChevronRight,
 } from "lucide-react";
-import { detectForensics, ForensicsResponse } from "@/lib/api";
+import { detectForensicsStream, ForensicsResponse } from "@/lib/api";
+import MediaPreview from "./MediaPreview";
 
 const MODES = [
   { key: "auto", label: "Auto Detect", icon: Sparkles, desc: "Autonomous mode — identifies authentic, deepfake, or AI-generated." },
@@ -31,26 +32,35 @@ export default function ForensicsView() {
   const [result, setResult] = useState<ForensicsResponse | null>(null);
   const [activeTab, setActiveTab] = useState<"ela" | "gradcam" | "metadata">("ela");
   const [dragOver, setDragOver] = useState(false);
+  const [media, setMedia] = useState<{ url: string; isVideo: boolean; name: string } | null>(null);
+  const [stepDetail, setStepDetail] = useState<string>("");
 
   const runAnalysis = async (file: File) => {
     setLoading(true);
     setError(null);
     setResult(null);
-    setScanStep(1);
-
-    const t1 = setTimeout(() => setScanStep(2), 600);
-    const t2 = setTimeout(() => setScanStep(3), 1400);
-    const t3 = setTimeout(() => setScanStep(4), 2200);
+    setScanStep(0);
+    setStepDetail("Uploading…");
+    setMedia({
+      url: URL.createObjectURL(file),
+      isVideo: file.type.startsWith("video/") || /\.(mp4|mov|avi|mkv|webm)$/i.test(file.name),
+      name: file.name,
+    });
 
     try {
-      const res = await detectForensics(file, mode);
+      // Real stage-by-stage progress from the backend (Server-Sent Events).
+      const res = await detectForensicsStream(file, mode, (evt) => {
+        if (evt.event !== "stage" || !evt.stage) return;
+        setScanStep(evt.status === "completed" ? evt.stage : evt.stage - 0.5);
+        setStepDetail(evt.details?.message || `${evt.name} ${evt.status === "completed" ? "done" : "…"}`);
+      });
       setResult(res);
     } catch (err: any) {
       setError(err?.message || "Analysis failed. Is the backend running?");
     } finally {
-      clearTimeout(t1); clearTimeout(t2); clearTimeout(t3);
       setLoading(false);
       setScanStep(0);
+      setStepDetail("");
     }
   };
 
@@ -172,16 +182,18 @@ export default function ForensicsView() {
                 </div>
                 <div>
                   <p className="text-sm font-semibold text-white">Running {MODES.find(m => m.key === mode)?.label} Analysis…</p>
-                  <p className="text-xs text-slate-400 mt-0.5">Multi-model ensemble fusion on CUDA GPU</p>
+                  <p className="text-xs text-slate-400 mt-0.5">{stepDetail || "Multi-model ensemble fusion on CUDA GPU"}</p>
                 </div>
               </div>
               <div className="grid grid-cols-4 gap-2 text-xs">
                 {["Provenance & EXIF", "ELA Compression", "ViT Backbones", "Ensemble Verdict"].map((step, i) => (
                   <div
                     key={i}
-                    className={`p-2 rounded-lg border text-center transition-all ${scanStep > i
+                    className={`p-2 rounded-lg border text-center transition-all ${scanStep >= i + 1
                       ? "bg-purple-950/40 border-purple-500/40 text-purple-300"
-                      : "bg-slate-950 border-slate-800 text-slate-600"
+                      : scanStep > i
+                        ? "bg-cyan-950/40 border-cyan-500/60 text-cyan-200 animate-pulse"
+                        : "bg-slate-950 border-slate-800 text-slate-600"
                       }`}
                   >
                     <div className="font-semibold text-[11px]">{i + 1}. {step.split(" ")[0]}</div>
@@ -280,11 +292,14 @@ export default function ForensicsView() {
                 </div>
               </div>
 
+              {/* What was analysed */}
+              <MediaPreview url={media?.url ?? null} isVideo={!!media?.isVideo} name={media?.name} />
+
               {/* 4 Model Score Cards */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 {[
                   { name: "CommFor ViT-S", value: result.commfor_score, icon: Cpu, color: "text-sky-400", desc: "4,803 Generators" },
-                  { name: "NPR ResNet-50", value: result.bfree_score, icon: Layers, color: "text-indigo-400", desc: "Pixel Neighbor" },
+                  { name: "B-Free ViT-B", value: result.bfree_score, icon: Layers, color: "text-indigo-400", desc: "Bias-free (CVPR 2025)" },
                   { name: "CLIP ViT-L/14", value: result.clip_score, icon: Eye, color: "text-purple-400", desc: "Semantic Head" },
                   { name: "GenD Face", value: result.gend_score, icon: Drama, color: "text-amber-400", desc: result.face_checked === false ? "Not Checked" : result.faces_found > 0 ? `${result.faces_found} Face(s)` : "No Face Found" },
                 ].map(({ name, value, icon: Icon, color, desc }) => {

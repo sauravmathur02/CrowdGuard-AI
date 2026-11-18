@@ -1,148 +1,174 @@
-# CrowdGuard AI — Crowd Anomaly & Deepfake Detection System
-> **Unified Physical Crowd Threat Intelligence & Digital Media Forensics Platform**  
-> *Developed for College Project Review 1 & 2 Defense*
+# CrowdGuard AI
+
+**Crowd threat monitoring and deepfake media verification in one system.**
+
+CrowdGuard AI analyses an image or video of a crowd incident in two ways. It counts and tracks people and looks for weapons, and it checks whether the footage itself is AI-generated or face-swapped. Both results are combined into one incident verdict, so that a fabricated clip of an "armed crowd" is not treated as a real emergency.
+
+Built as a college dissertation project (Rashtriya Raksha University). Backend: FastAPI + PyTorch on a single laptop GPU. Frontend: Next.js 14.
+
+![Dual investigation pipeline](docs/screenshots/06_dual_investigation_pipeline.png)
 
 ---
 
-## Overview
+## Screenshots
 
-**CrowdGuard AI** is an advanced security intelligence platform that unites **Real-Time Physical Crowd Surveillance** with **Deepfake & Synthetic Media Forensics**. It addresses a critical modern security vector: verifying whether security footage of an escalating crowd anomaly or weapon threat is physical reality or a synthetic / spoofed digital forgery.
+| Crowd Surveillance | Crowd tracking on CCTV |
+|---|---|
+| ![Crowd surveillance](docs/screenshots/01_crowd_surveillance_idle.png) | ![Crowd tracking](docs/screenshots/04_crowd_surveillance_tracking.png) |
 
-```
-                      CrowdGuard AI Architecture
-                ┌────────────────────────────────────┐
-                │        Video / Image Input         │
-                └─────────────────┬──────────────────┘
-                                  │
-                ┌─────────────────▼──────────────────┐
-                │        Video Preprocessing         │
-                └─────────────────┬──────────────────┘
-                                  │
-              ┌───────────────────┴───────────────────┐
-              │                                       │
-              ▼                                       ▼
-   ┌─────────────────────┐                 ┌─────────────────────┐
-   │ Crowd Intelligence  │                 │  Deepfake Forensics │
-   │      Pipeline       │                 │      Pipeline       │
-   └──────────┬──────────┘                 └──────────┬──────────┘
-              │                                       │
-              ▼                                       ▼
-   • YOLOv8 Person Tracker                 • Community Forensics ViT
-   • ByteTrack Trajectories                • B-Free / NPR ResNet-50
-   • Crowd Density Score                   • UniversalFake CLIP
-   • Weapon Localization                   • GenD Face Microservice
-   • Feed Tampering Check                  • ELA & GradCAM Explainability
-              │                                       │
-              └───────────────────┬───────────────────┘
-                                  ▼
-                     ┌─────────────────────────┐
-                     │   Risk / Event Engine   │
-                     └────────────┬────────────┘
-                                  ▼
-                     ┌─────────────────────────┐
-                     │   Next.js 14 Dashboard  │
-                     ├─────────────────────────┤
-                     │ • Crowd Density Tracker │
-                     │ • Weapon Anomaly Type   │
-                     │ • Deepfake Probability  │
-                     │ • Integrated Risk Level │
-                     │ • Dual-Forensic Dossier │
-                     └─────────────────────────┘
-```
+| Deepfake Forensics: verdict and analysed media | Deepfake Forensics: model scores and ELA heatmap |
+|---|---|
+| ![Forensics verdict](docs/screenshots/02_forensics_verdict.png) | ![Forensics models](docs/screenshots/03_forensics_models_heatmap.png) |
+
+| Dual Investigation: live pipeline | Dual Investigation: combined verdict |
+|---|---|
+| ![Pipeline](docs/screenshots/06_dual_investigation_pipeline.png) | ![Result](docs/screenshots/05_dual_investigation_result.png) |
 
 ---
 
-## Key Features
+## What it does
 
-1. **Physical Crowd Threat Pipeline**:
-   - **YOLOv8 Real-Time Person Detection & ByteTrack**: Tracks human flow and crowd density on CUDA GPU.
-   - **Weapon Hazard Localization**: MobileNetV3 / YOLO custom heads alerting on edge weapons.
-   - **Video Feed Tamper Detection**: Compares frame-by-frame structural similarity and noise continuity to catch loop playback and feed cutting.
-2. **Digital Media Forensics Pipeline**:
-   - **Four-Backbone Ensemble**: Community Forensics (ViT-S/16), B-Free/NPR (ResNet-50), UniversalFakeDetect (CLIP ViT-L/14), and GenD (WACV 2026 Face model).
-   - **Explainability Maps**: Error Level Analysis (ELA) compression heatmaps and GradCAM attention visualizations.
-   - **Natural Language Verdicts**: Translates complex spectral Fourier and spatial artifact metrics into clear security intelligence.
-3. **Dual Investigation Engine**:
-   - Simultaneously runs physical tracking and deepfake forensics on suspicious incidents to prevent emergency responders from being baited by spoofed or AI-generated feeds.
-4. **Modern Web Console**:
-   - Built on **React 18 / Next.js 14 / TailwindCSS** with dark-mode security HUD, real-time VRAM telemetry, and four operational views.
+**Crowd Surveillance**
+- YOLOv8 detection of people, guns and knives (custom `best.pt`), with a MobileNetV3 classifier (`classifier.pth`) that confirms the weapon type.
+- Crowd count, fast-movement flag and a risk score (SAFE / ELEVATED / ALERT / DANGER / CRITICAL).
+- Annotated keyframes and a frame-by-frame timeline for videos.
 
----
+**Deepfake Forensics** (modes: Auto, Deepfake face, AI-generated)
+- Whole-image detectors: Community Forensics ViT-S/16 (CVPR 2025), B-Free DINOv2 ViT-B (CVPR 2025), UniversalFakeDetect CLIP ViT-L/14.
+- Face detector: GenD CLIP ViT-L/14 (WACV 2026), run in a separate worker process.
+- Each score is Platt-calibrated and the scores are combined by a logistic model fitted on labelled public data (`CrowdGuardAI/data/calibration.json`).
+- Evidence: ELA map, ViT attention map, noise residual, EXIF and C2PA metadata.
+- If a check cannot run (for example the face worker is down), the result says **Inconclusive** with a warning instead of reporting "authentic".
 
-## Project Structure
-
-```
-d:\Projects\Deepfake\
-├── CrowdGuardAI/               # FastAPI Backend & Vision Pipeline
-│   ├── app.py                  # Main server, routing, CUDA device manager
-│   ├── crowd/                  # Crowd intelligence (YOLO, tracker, behavior, risk engine, weapon classifier)
-│   ├── detectors/              # Forensics backbones (CommFor, B-Free, CLIP, GenD client)
-│   ├── models/                 # Neural architectures (CLIP, ViT, ResNet)
-│   ├── pretrained_weights/     # Model weights (not in git; see Setup below)
-│   └── static/uploads/         # Runtime storage for media fetched via /fetch-url
-├── frontend/                   # Next.js 14 React Application (the only web UI)
-│   ├── src/app/                # Next.js App Router (page.tsx, layout.tsx, globals.css)
-│   ├── src/components/         # SurveillanceView, ForensicsView, InvestigationView, Review2PendingView
-│   ├── src/lib/api.ts          # Typed API gateway connector
-│   └── public/static/samples/  # Demo images/videos used by the "Test Sample" buttons (incl. F.png, R.jpg)
-├── archive/                    # Preserved legacy repositories, benchmarks & experiments
-│   ├── UniversalFakeDetect/    # Archived upstream source
-│   ├── sentinelvision.../      # Archived standalone crowd repository
-│   └── stray_scripts/          # Archived evaluation scripts
-├── venv_gend/                  # Python virtual environment (PyTorch CUDA 12.1)
-├── run_crowdguard.bat          # One-click startup script (Backend + Frontend)
-└── PROJECT_REPORT.md           # Comprehensive technical report & architecture spec
-```
-
-`archive/sentinelvision-ai-surveillance` is a git submodule. Clone with `git clone --recurse-submodules`, or run `git submodule update --init` after cloning.
-
-### Setup
-
-- **Model weights** are not stored in git. Place them in `CrowdGuardAI/pretrained_weights/`: `yolo_crowd.pt` (YOLOv8n person tracker), `NPR.pth` (B-Free/NPR), and `fc_weights.pth` (UniversalFakeDetect CLIP head). The GenD worker downloads its OpenCV face detector files (`deploy.prototxt`, `res10_300x300_ssd_iter_140000.caffemodel`) automatically if they are missing, and Community Forensics weights (`OwensLab/commfor-model-384`) are downloaded from Hugging Face on first run.
-- **Python environment**: `python -m venv venv_gend`, then `venv_gend\Scripts\pip install -r requirements.txt -r requirements_gend.txt`.
-- **Frontend**: `cd frontend && npm install && npm run build`.
+**Dual Investigation**
+- Runs **Stage 1 Crowd Surveillance → Stage 2 Deepfake Forensics → Stage 3 Cross-Verification**, with live progress streamed to the browser.
+- Verdicts: fabricated threat, media manipulation, verified physical incident, verified crowd surge, routine capture.
 
 ---
 
-## College Guide Review Schedule
+## Measured accuracy (images)
 
-| Milestone | Scope & Deliverables | Status |
+Held-out test split of 1,010 image variants (Defactify, DeepFakeFace and GenD sample crops; each image scored as the original and as a JPEG q85 copy). Version 1 was the earlier hand-tuned pipeline.
+
+| | Fakes detected | Real images correct | Balanced accuracy | AUC |
+|---|---|---|---|---|
+| Version 1 | 62% | 76% | 69% | – |
+| **Current** | **79%** | **96%** | **88%** | **0.943** |
+
+False alarms on real faces fell from 43% to 3%. Weak spots: DALL-E 3 images (40% detected) and InsightFace face swaps (46%). Video accuracy is not measured yet; the Celeb-DF test set and script are ready (`tools/eval_video.py`). Full details are in the [dissertation report](docs/report/CrowdGuardAI_Report.md).
+
+---
+
+## Quick start
+
+Requirements: Windows 10/11, NVIDIA GPU with CUDA (tested on an RTX 4050 6 GB), Python 3.12, Node.js 20+.
+
+### 1. Install
+
+```powershell
+git clone --recurse-submodules https://github.com/sauravmathur02/CrowdGuard-AI.git
+cd CrowdGuard-AI
+python -m venv venv_gend
+venv_gend\Scripts\pip install -r requirements.txt -r requirements_gend.txt
+cd frontend
+npm install
+npm run build
+cd ..
+```
+
+### 2. Model weights (not stored in git)
+
+| File / folder | Put it in | Source |
 |---|---|---|
-| **Review 1** | Dual-pipeline architecture, live real-time webcam/CCTV inference with YOLOv8 person tracking, multi-model deepfake forensics (ViT, ResNet, CLIP, GenD), cross-correlated incident investigation engine, and full responsive Next.js operations console. | **100% COMPLETE & VERIFIED** |
-| **Review 2** | Custom YOLOv8 weapon weights (`best.pt` / `classifier.pth`), optical flow density vector maps, automated cryptographic PDF incident export, and multi-node cluster database synchronization. | **PENDING (Phase 2 Review)** |
+| `best.pt` (YOLOv8: person, gun, knife) | `CrowdGuardAI/pretrained_weights/` | [sentinelvision-ai-surveillance](https://github.com/sauravmathur02/sentinelvision-ai-surveillance/tree/main/project/models) |
+| `classifier.pth` (MobileNetV3 gun/knife) | `CrowdGuardAI/pretrained_weights/` | same as above |
+| `yolo_crowd.pt` (YOLOv8n, fallback if `best.pt` is missing) | `CrowdGuardAI/pretrained_weights/` | Ultralytics `yolov8n.pt`, renamed |
+| `fc_weights.pth` (UniversalFakeDetect head) | `CrowdGuardAI/pretrained_weights/` | [UniversalFakeDetect](https://github.com/WisconsinAIVision/UniversalFakeDetect) |
+| `GenD/` | `CrowdGuardAI/pretrained_weights/GenD/` | Hugging Face `yermandy/GenD_CLIP_L_14` |
+| `BFREE_dino2reg4/` | `CrowdGuardAI/detectors/B-Free/code/weights/` | [B-Free weights](https://github.com/grip-unina/B-Free/tree/main/code) (MD5 f3f53fa647848b16cf81c913f148a198) |
+
+Community Forensics (`OwensLab/commfor-model-384`) and the OpenCV face-detector files download automatically on first run.
+
+### 3. Run
+
+Double-click **`run_crowdguard.bat`**, wait about 2–3 minutes for the models to load, then open **http://localhost:3000**.
+
+Or run it manually in two terminals:
+
+```powershell
+# Terminal 1: backend (port 8000, starts the GenD worker on 8001)
+cd CrowdGuardAI
+..\venv_gend\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port 8000
+
+# Terminal 2: frontend (port 3000)
+cd frontend
+npm run start      # run `npm run build` first after any frontend change
+```
+
+Check readiness at http://localhost:8000/api/health (`"ensemble_ready": true`). API docs: http://localhost:8000/docs.
 
 ---
 
-## Quickstart & How to Run
+## API
 
-### Option 1: One-Click Startup (Recommended)
-Double-click:
-```cmd
-run_crowdguard.bat
-```
-This script launches the FastAPI backend on port 8000, starts the Next.js frontend on port 3000, and opens your browser automatically.
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/api/health` | GPU memory, loaded models, calibration status |
+| POST | `/api/crowd/detect` | Crowd analysis of one image |
+| POST | `/api/crowd/video` | Crowd analysis of a video (keyframes + timeline) |
+| POST | `/predict` | Deepfake analysis (`mode`: auto, deepfake, ai_generated) |
+| POST | `/api/predict/stream` | Same, with stage-by-stage progress (SSE) |
+| POST | `/api/investigate` | Dual investigation (crowd → forensics → verdict) |
+| POST | `/api/investigate/stream` | Same, with live progress (SSE) |
+| POST | `/fetch-url` | Download media from a URL |
+| POST | `/feedback` | Store an operator correction |
 
-### Option 2: Manual Startup
+---
 
-**Terminal 1 — FastAPI Backend**:
+## Reproducing the evaluation
+
 ```powershell
 cd CrowdGuardAI
-..\venv_gend\Scripts\activate
-python -m uvicorn app:app --host 0.0.0.0 --port 8000
+..\venv_gend\Scripts\python.exe tools\build_eval_set.py     # download labelled images
+..\venv_gend\Scripts\python.exe tools\calibrate.py          # score, fit calibration, report held-out accuracy
+..\venv_gend\Scripts\python.exe tools\build_video_eval.py   # download Celeb-DF v2 test videos
+..\venv_gend\Scripts\python.exe tools\eval_video.py         # fit video fusion, report video accuracy
 ```
-
-**Terminal 2 — Next.js 14 Frontend**:
-```powershell
-$env:Path = "C:\Program Files\nodejs;" + $env:Path
-cd frontend
-npm run build   # required after any frontend change; `npm run start` serves the last build
-npm run start
-# Or for live development:
-# npm run dev
-```
-
-Visit the application at: **`http://localhost:3000`**. The backend API runs at `http://localhost:8000` (interactive docs at `/docs`); opening its root URL redirects to the web console.
 
 ---
 
-*See [`PROJECT_REPORT.md`](PROJECT_REPORT.md) for full technical documentation, mathematical models, and benchmark results.*
+## Project structure
+
+```
+CrowdGuardAI/            FastAPI backend
+  app.py                 routes, forensics pipeline, dual investigation
+  gend_worker.py         GenD face worker (port 8001)
+  crowd/                 YOLO detector, smoothing, behaviour, risk engine, weapon classifier
+  detectors/             CommFor, B-Free, CLIP, calibration, fusion (ensemble.py), video, ELA/heatmaps
+  data/                  calibration.json (fitted), eval_scores.json
+  tools/                 dataset download, calibration and video evaluation scripts
+  pretrained_weights/    model weights (not in git)
+frontend/                Next.js 14 console
+  src/components/        Surveillance, Forensics, Investigation, PipelineTracker, MediaPreview
+  src/lib/api.ts         typed API client (incl. SSE streaming)
+  public/static/samples/ demo images and videos
+docs/report/             dissertation (Markdown + Overleaf LaTeX, RRU format)
+docs/screenshots/        UI screenshots
+archive/                 legacy code (UniversalFakeDetect, sentinelvision submodule)
+run_crowdguard.bat       one-click launcher
+```
+
+---
+
+## Roadmap (Review 2)
+
+- Video accuracy on Celeb-DF and a fitted video fusion model.
+- Optical-flow crowd motion analysis and multi-camera RTSP streams.
+- Signed PDF incident reports and an incident database.
+- More generators (Flux, SD 3.5) and messaging-app compression in the calibration set.
+
+---
+
+## Credits and licences
+
+Uses published models and data: Community Forensics (Park & Owens, CVPR 2025), B-Free (Guillaro et al., CVPR 2025), UniversalFakeDetect (Ojha et al., CVPR 2023), GenD (Yermakov et al., WACV 2026), Ultralytics YOLOv8, ByteTrack, Defactify, DeepFakeFace, FaceForensics++ and Celeb-DF. **B-Free's licence permits non-profit use only.** Check each model's licence before any commercial use.

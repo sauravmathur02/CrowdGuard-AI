@@ -352,25 +352,34 @@ def check_frame_integrity(frame_bgr: np.ndarray) -> Tuple[bool, float, dict]:
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(rgb)
 
-        c_scores = commfor_model.predict([pil_img])
-        c_score = float(c_scores[0]) if c_scores else 0.0
-
-        b_score = 0.0
-        if bfree_model.is_available:
-            b_scores = bfree_model.predict([pil_img])
-            b_score = float(b_scores[0]) if b_scores and b_scores[0] is not None else 0.0
-
-        synth_risk = max(c_score, b_score)
-        integrity_score = max(0.0, min(1.0, 1.0 - synth_risk))
-        is_tampered = synth_risk > 0.46
+        # Same calibrated detectors and fitted fusion as the forensics pipeline, so a frame is
+        # called tampered only when the fused probability passes the fitted decision threshold.
+        s = ensemble.score_image(pil_img, commfor_model, bfree_model, clip_model)
+        fused = ensemble.fuse(s)
+        p_fake = fused["p_fake"] if fused["p_fake"] is not None else 0.0
+        integrity_score = max(0.0, min(1.0, 1.0 - float(p_fake)))
+        is_tampered = float(p_fake) > float(fused["threshold"])
 
         return (
             is_tampered,
             round(integrity_score, 4),
-            {"commfor": round(c_score, 4), "bfree": round(b_score, 4)},
+            {k: (round(v, 4) if v is not None else None) for k, v in s.items()},
         )
     except Exception as e:
         return (False, 1.0, {"error": str(e)})
+
+
+async def media_integrity(contents: bytes, filename: str, content_type: str) -> Tuple[bool, float]:
+    """Feed integrity for the Surveillance endpoints: (is_tampered, integrity score in [0, 1]),
+    taken from the full forensics pipeline so every tab gives the same verdict."""
+    try:
+        r = await execute_pipeline(contents, filename, content_type, mode="auto")
+        if not r.get("success") or r.get("prediction") not in ("Fake", "Real"):
+            return False, 1.0
+        return r["prediction"] == "Fake", round(1.0 - float(r.get("score", 0.0)), 4)
+    except Exception as e:
+        print(f"Notice: feed integrity check failed ({e}).")
+        return False, 1.0
 
 
 # ── CORE DEEPFAKE DETECTION PIPELINE ──────────────────────────────────────
@@ -449,7 +458,7 @@ async def execute_pipeline(
 
     if stage_callback:
         await stage_callback(3, "Deep Semantic Vision Backbones", "running", {
-            "message": "Evaluating CommFor ViT-S, B-Free NPR ResNet, CLIP ViT-L/14, and GenD face worker..."
+            "message": "Evaluating Community Forensics, B-Free, CLIP ViT-L/14 and the GenD face model..."
         })
 
     face = gend_client.score(filename, contents, content_type)
@@ -858,6 +867,7 @@ async def predict_stream(file: UploadFile = File(...), mode: str = Form("auto"))
                 "timestamp": datetime.datetime.utcnow().isoformat(),
                 "details": details,
             })
+            await asyncio.sleep(0.02)  # let the event reach the browser before the next heavy step
 
         async def worker_task():
             try:
@@ -901,8 +911,8 @@ async def crowd_detect_image(file: UploadFile = File(...)):
     if frame_bgr is None:
         return {"success": False, "error": "Invalid image format"}
 
-    # Verify frame integrity (check for deepfake/synthetic injection)
-    is_tampered, integrity_score, integ_details = check_frame_integrity(frame_bgr)
+    # Feed integrity = the same calibrated forensics verdict as /predict (incl. the GenD face check)
+    is_tampered, integrity_score = await media_integrity(contents, file.filename or "frame.jpg", file.content_type or "image/jpeg")
 
     # Process frame through surveillance engine
     processed = feed_processor.process_frame(
@@ -942,26 +952,23 @@ async def crowd_analyze_video(file: UploadFile = File(...)):
         num_samples = min(16, max(6, int(duration_sec * 2)))
         indices = np.linspace(0, max(total_frames - 1, 0), num_samples).astype(int)
 
+        # One forensics verdict for the whole clip (same result as the Forensics tab).
+        feed_compromised, avg_integrity = await media_integrity(contents, file.filename or "video.mp4", file.content_type or "video/mp4")
+
         feed_processor.reset()
         timeline = []
         sampled_annotated_frames = []
         peak_crowd = 0
         all_weapon_labels = set()
-        feed_tampered_count = 0
-        integrity_scores = []
+        index_set = set(int(i) for i in indices)
 
         for idx in range(total_frames):
             ret, frame = cap.read()
             if not ret:
                 break
 
-            if idx in indices:
-                # Run feed integrity check on sampled frames
-                is_tampered, integrity_score, _ = check_frame_integrity(frame)
-                if is_tampered:
-                    feed_tampered_count += 1
-                integrity_scores.append(integrity_score)
-
+            if idx in index_set:
+                is_tampered, integrity_score = feed_compromised, avg_integrity
                 sec = round(idx / max(fps, 1.0), 2)
                 processed = feed_processor.process_frame(
                     frame,
@@ -994,8 +1001,6 @@ async def crowd_analyze_video(file: UploadFile = File(...)):
                     })
 
         cap.release()
-        avg_integrity = float(np.mean(integrity_scores)) if integrity_scores else 1.0
-        feed_compromised = feed_tampered_count >= max(1, len(indices) // 4)
 
         overall_risk = compute_risk(
             crowd_count=peak_crowd,
@@ -1018,7 +1023,7 @@ async def crowd_analyze_video(file: UploadFile = File(...)):
             "feed_integrity": {
                 "score": round(avg_integrity, 3),
                 "is_compromised": feed_compromised,
-                "tampered_samples": feed_tampered_count,
+                "tampered_samples": len(indices) if feed_compromised else 0,
                 "total_samples": len(indices),
             },
             "timeline": timeline,
@@ -1032,88 +1037,99 @@ async def crowd_analyze_video(file: UploadFile = File(...)):
 
 
 # ── NOVEL DUAL-PIPELINE INCIDENT INVESTIGATION ENDPOINT ────────────────────
-@app.post("/api/investigate")
-async def incident_investigation(file: UploadFile = File(...)):
+async def run_investigation(contents: bytes, filename: str, content_type: str, emit=None) -> Dict[str, Any]:
     """
-    Unified Incident Investigation Mode:
-    Executes BOTH the Crowd Surveillance Pipeline AND the Media Forensics Pipeline
-    simultaneously on the same incident footage.
-    Correlates physical security anomalies with digital tampering evidence.
+    Dual-pipeline incident investigation, in order:
+      Stage 1  Crowd surveillance (YOLO person / weapon detection on sampled frames)
+      Stage 2  Deepfake media forensics (full calibrated pipeline)
+      Stage 3  Cross-verification verdict
+    emit(stage, name, status, details) is awaited for live progress (SSE); optional.
     """
-    contents = await file.read()
-    filename = file.filename or "incident.mp4"
-    content_type = file.content_type or "video/mp4"
+    async def _emit(stage: int, name: str, status: str, details: Optional[dict] = None):
+        if emit is not None:
+            await emit(stage, name, status, details or {})
 
-    # 1. Run Deepfake Media Forensics
-    deepfake_result = await execute_pipeline(contents, filename, content_type, mode="auto")
-    if not deepfake_result.get("success"):
-        # Without a forensics result the media must not be reported as authentic.
-        return {"success": False, "error": deepfake_result.get("error", "Media forensics analysis failed.")}
-
-    # 2. Run Crowd Surveillance on the media
     is_video = (
         filename.lower().endswith((".mp4", ".avi", ".mov", ".mkv", ".webm"))
         or content_type.startswith("video/")
     )
 
+    # ── Stage 1: crowd surveillance ────────────────────────────────────────
+    await _emit(1, "Crowd Surveillance", "running", {
+        "message": "Sampling frames and detecting people and weapons with YOLOv8..."
+    })
     if is_video:
-        frames, timestamps = sample_video_bytes_with_timestamps(contents, n_frames=8)
-        feed_processor.reset()
-        peak_crowd = 0
-        weapon_labels = set()
-        annotated_samples = []
-
-        for idx, frame_img in enumerate(frames):
-            frame_cv = cv2.cvtColor(np.array(frame_img), cv2.COLOR_RGB2BGR)
-            processed = feed_processor.process_frame(
-                frame_cv,
-                timestamp=f"{timestamps[idx]:.1f}s" if idx < len(timestamps) else f"Frame {idx}",
-                feed_tampered=bool(deepfake_result.get("prediction") == "Fake"),
-                feed_integrity_score=float(1.0 - deepfake_result.get("score", 0.0)),
-            )
-            peak_crowd = max(peak_crowd, processed.crowd_count)
-            for w in processed.weapon_labels:
-                weapon_labels.add(w)
-
-            if len(annotated_samples) < 3:
-                annotated_samples.append({
-                    "timestamp": f"{timestamps[idx]:.1f}s" if idx < len(timestamps) else f"Frame {idx}",
-                    "image": processed.to_base64_jpg(quality=75),
-                    "crowd_count": processed.crowd_count,
-                    "risk_level": processed.risk["level"],
-                })
-
-        crowd_summary = {
-            "peak_crowd": peak_crowd,
-            "weapons_found": list(weapon_labels),
-            "annotated_samples": annotated_samples,
-        }
+        frames_pil, timestamps = sample_video_bytes_with_timestamps(contents, n_frames=8)
+        frames = [cv2.cvtColor(np.array(f), cv2.COLOR_RGB2BGR) for f in frames_pil]
+        stamps = [f"{t:.1f}s" for t in timestamps]
     else:
-        nparr = np.frombuffer(contents, np.uint8)
-        frame_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if frame_cv is not None:
-            processed = feed_processor.process_frame(
-                frame_cv,
-                feed_tampered=bool(deepfake_result.get("prediction") == "Fake"),
-                feed_integrity_score=float(1.0 - deepfake_result.get("score", 0.0)),
-            )
-            crowd_summary = {
-                "peak_crowd": processed.crowd_count,
-                "weapons_found": processed.weapon_labels,
-                "annotated_samples": [{
-                    "timestamp": "0.0s",
-                    "image": processed.to_base64_jpg(quality=80),
-                    "crowd_count": processed.crowd_count,
-                    "risk_level": processed.risk["level"],
-                }],
-            }
-        else:
-            crowd_summary = {"peak_crowd": 0, "weapons_found": [], "annotated_samples": []}
+        frame_cv = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
+        frames = [frame_cv] if frame_cv is not None else []
+        stamps = ["0.0s"]
+    if not frames:
+        await _emit(1, "Crowd Surveillance", "failed", {"message": "Could not read any frames from this file."})
+        return {"success": False, "error": "Could not read the image or video frames."}
 
-    # 3. Synthesize Unified Threat & Forensic Incident Verdict
+    feed_processor.reset()
+    peak_crowd, weapon_labels, per_frame = 0, set(), []
+    for frame, ts in zip(frames, stamps):
+        processed = feed_processor.process_frame(frame, timestamp=ts)
+        peak_crowd = max(peak_crowd, processed.crowd_count)
+        weapon_labels.update(w for w in processed.weapon_labels if w)
+        per_frame.append({"timestamp": ts, "crowd_count": processed.crowd_count,
+                          "weapon_count": len(processed.weapon_labels)})
+    await _emit(1, "Crowd Surveillance", "completed", {
+        "frames_analyzed": len(frames),
+        "peak_crowd": peak_crowd,
+        "weapons": sorted(weapon_labels),
+    })
+
+    # ── Stage 2: deepfake forensics ────────────────────────────────────────
+    await _emit(2, "Deepfake Forensics", "running", {
+        "message": "Running Community Forensics, B-Free, CLIP and the GenD face model..."
+    })
+
+    async def _forensics_stage(stage_num: int, stage_name: str, status: str, details: dict):
+        await _emit(2, "Deepfake Forensics", "running", {"substage": stage_num, "substage_name": stage_name,
+                                                          "substage_status": status, **details})
+
+    deepfake_result = await execute_pipeline(contents, filename, content_type, mode="auto",
+                                             stage_callback=_forensics_stage)
+    if not deepfake_result.get("success"):
+        # Without a forensics result the media must not be reported as authentic.
+        await _emit(2, "Deepfake Forensics", "failed", {"message": deepfake_result.get("error")})
+        return {"success": False, "error": deepfake_result.get("error", "Media forensics analysis failed.")}
     is_fake = deepfake_result.get("prediction") == "Fake"
     fake_score = float(deepfake_result.get("score", 0.0))
-    has_weapons = len(crowd_summary["weapons_found"]) > 0
+    await _emit(2, "Deepfake Forensics", "completed", {
+        "prediction": deepfake_result.get("prediction"),
+        "score": round(fake_score, 4),
+        "faces_found": deepfake_result.get("faces_found", 0),
+    })
+
+    # ── Stage 3: cross-verification ────────────────────────────────────────
+    await _emit(3, "Cross-Verification Verdict", "running", {"message": "Correlating crowd and media evidence..."})
+    # Render the evidence keyframes now that the feed-integrity result is known.
+    feed_processor.reset()
+    annotated_samples = []
+    for frame, ts in list(zip(frames, stamps))[:3]:
+        processed = feed_processor.process_frame(
+            frame, timestamp=ts, feed_tampered=is_fake, feed_integrity_score=1.0 - fake_score,
+        )
+        annotated_samples.append({
+            "timestamp": ts,
+            "image": processed.to_base64_jpg(quality=78),
+            "crowd_count": processed.crowd_count,
+            "risk_level": processed.risk["level"],
+        })
+    crowd_summary = {
+        "peak_crowd": peak_crowd,
+        "weapons_found": sorted(weapon_labels),
+        "annotated_samples": annotated_samples,
+        "frames_analyzed": len(frames),
+        "timeline": per_frame,
+    }
+    has_weapons = len(weapon_labels) > 0
 
     if is_fake and has_weapons:
         incident_verdict = "CRITICAL / FABRICATED THREAT (DEEPFAKE DISINFORMATION)"
@@ -1127,7 +1143,7 @@ async def incident_investigation(file: UploadFile = File(...)):
         incident_verdict = "VERIFIED PHYSICAL SECURITY INCIDENT"
         verdict_summary = "AUTHENTIC EVIDENCE: Camera physics verified as natural optical capture. Real-world weapon threat detected in the crowd."
         threat_level = "CRITICAL"
-    elif crowd_summary["peak_crowd"] > 15:
+    elif peak_crowd > 15:
         incident_verdict = "VERIFIED CROWD SURGE (AUTHENTIC)"
         verdict_summary = "AUTHENTIC EVIDENCE: Camera physics verified. High crowd density event detected without digital tampering."
         threat_level = "ELEVATED"
@@ -1136,9 +1152,12 @@ async def incident_investigation(file: UploadFile = File(...)):
         verdict_summary = "Footage is authentic optical capture. No physical weapons or digital tampering detected."
         threat_level = "SAFE"
 
+    await _emit(3, "Cross-Verification Verdict", "completed", {"verdict": incident_verdict, "threat_level": threat_level})
+
     return {
         "success": True,
         "filename": filename,
+        "media_type": "video" if is_video else "image",
         "incident_verdict": incident_verdict,
         "verdict_summary": verdict_summary,
         "threat_level": threat_level,
@@ -1157,6 +1176,54 @@ async def incident_investigation(file: UploadFile = File(...)):
         "deepfake_raw": deepfake_result,
     }
 
+
+def _sse_response(runner) -> StreamingResponse:
+    """Wrap `runner(emit)` (an async function returning the final result) as an SSE stream."""
+    async def stream():
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def emit(stage: int, name: str, status: str, details: dict):
+            await queue.put({"event": "stage", "stage": stage, "name": name, "status": status, "details": details})
+            # The models run synchronously on the event loop; yield briefly so this event is
+            # flushed to the browser before the next heavy step starts.
+            await asyncio.sleep(0.02)
+
+        async def worker():
+            try:
+                await queue.put({"event": "complete", "result": await runner(emit)})
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                await queue.put({"event": "error", "error": str(exc)})
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(worker())
+        yield f"data: {json.dumps({'event': 'started'})}\n\n"
+        while True:
+            msg = await queue.get()
+            if msg is None:
+                break
+            yield f"data: {json.dumps(msg)}\n\n"
+        await task
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/api/investigate")
+async def incident_investigation(file: UploadFile = File(...)):
+    """Dual-pipeline investigation (crowd surveillance, then deepfake forensics, then verdict)."""
+    contents = await file.read()
+    return await run_investigation(contents, file.filename or "incident.mp4", file.content_type or "video/mp4")
+
+
+@app.post("/api/investigate/stream")
+async def incident_investigation_stream(file: UploadFile = File(...)):
+    """Same as /api/investigate, streaming stage-by-stage progress as Server-Sent Events."""
+    contents = await file.read()
+    filename, ctype = file.filename or "incident.mp4", file.content_type or "video/mp4"
+    return _sse_response(lambda emit: run_investigation(contents, filename, ctype, emit=emit))
 
 # ── ACTIVE LEARNING FEEDBACK & BENCHMARK ACCURACY ENDPOINT ─────────────────
 def compute_benchmark_and_feedback_stats() -> Dict[str, Any]:

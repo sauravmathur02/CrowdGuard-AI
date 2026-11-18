@@ -81,6 +81,8 @@ class YOLODetector:
         print(f"Loading YOLO model from: {self.weights_path} onto {self.device}")
         self.model = YOLO(self.weights_path)
         self.tracker_config = get_bytetrack_config_path()
+        # ByteTrack needs consecutive frames; enable only for continuous streams.
+        self.use_tracking = False
 
         # Check if custom 3-class (person, gun, knife) or COCO
         num_classes = len(getattr(self.model, "names", {}))
@@ -120,19 +122,24 @@ class YOLODetector:
                     tracker.reset()
 
     def detect(self, frame_bgr) -> List[Detection]:
-        results = self.model.track(
+        common = dict(
             source=frame_bgr,
             conf=self.conf,
             iou=self.iou,
             imgsz=self.imgsz,
-            persist=True,
-            tracker=self.tracker_config,
             device=self.device,
             classes=self.track_classes,
             half=self.use_half,
             verbose=False,
             max_det=300,
         )
+        if self.use_tracking:
+            results = self.model.track(persist=True, tracker=self.tracker_config, **common)
+        else:
+            # Frame-by-frame detection. The API endpoints analyse a few frames spread across a
+            # clip (or a single image); ByteTrack only reports objects seen in consecutive
+            # frames, so with sparse frames it silently dropped every new weapon/person box.
+            results = self.model.predict(**common)
 
         if not results:
             return []
@@ -253,4 +260,7 @@ class YOLODetector:
         return penalty
 
     def unique_track_count(self, detections: Sequence[Detection], label: str) -> int:
-        return len({det.track_id for det in detections if det.label == label and det.track_id is not None})
+        """Distinct tracked objects; when tracking is off (no track ids), count the boxes."""
+        dets = [det for det in detections if det.label == label]
+        ids = {det.track_id for det in dets if det.track_id is not None}
+        return len(ids) + sum(1 for det in dets if det.track_id is None)
